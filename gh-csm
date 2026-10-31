@@ -69,7 +69,7 @@ gh-csm — GitHub Codespaces 額度監控與管理器
 
 帳號:
   預設使用 gh 的 active 帳號。
-  --account <login>   指定已登入的帳號
+  --account <login>   指定已登入的帳號（亦可 --account=<login>）
   --all               所有已登入帳號，面板垂直堆疊（僅 dash）
 
 額度上限（預設 GitHub Free）:

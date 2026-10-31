@@ -139,6 +139,7 @@ gh csm help | --help | --version
 
 - 帳號預設 = gh 的 active 帳號；`--account` 指定；`--all` 逐一堆疊面板（僅 dash）。
 - `--account` 空白與等號兩種形式皆可；`--all`、`-c` 只有空白形式（`--all=1`、`-c=x` 視為未知參數）。
+- `-c` 與 `--codespace` 同義（`stop` / `run`）。
 - `stop` / `run` 不支援 `--all`（一次一個帳號）。
 - 未知子命令 / 未知旗標：訊息 + usage，exit 1。
 
