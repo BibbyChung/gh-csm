@@ -590,6 +590,7 @@ cmd_dash() {
     die "沒有已登入的帳號，先跑：gh auth login"
   fi
   first=1
+  # ponytail: 裸變數分詞——GitHub login 字元集 [a-zA-Z0-9-] 保證無空白；支援 GHES、含空白帳號名時須改陣列。
   for acct in $accounts; do
     if [ "$first" -eq 0 ]; then
       printf '\n'

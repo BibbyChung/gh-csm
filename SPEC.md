@@ -130,14 +130,15 @@ storage_pct        = floor(storage_gb_month  / storage_limit  × 100)
 
 ```
 gh csm                                  # help（不做 dash fallback）
-gh csm dash [--account <login> | --all]
-gh csm stop [-c <name>] [--account <login>]
-gh csm run -c <name> [snippet] [--account <login>]
+gh csm dash [--account <login> | --account=<login> | --all]
+gh csm stop [-c <name>] [--account <login> | --account=<login>]
+gh csm run -c <name> [snippet] [--account <login> | --account=<login>]
 gh csm selftest
 gh csm help | --help | --version
 ```
 
 - 帳號預設 = gh 的 active 帳號；`--account` 指定；`--all` 逐一堆疊面板（僅 dash）。
+- `--account` 空白與等號兩種形式皆可；`--all`、`-c` 只有空白形式（`--all=1`、`-c=x` 視為未知參數）。
 - `stop` / `run` 不支援 `--all`（一次一個帳號）。
 - 未知子命令 / 未知旗標：訊息 + usage，exit 1。
 
