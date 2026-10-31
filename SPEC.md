@@ -113,12 +113,15 @@ month_hours        = days_in_month(UTC year, UTC month) × 24      # 動態，�
 storage_gb_month   = storage_gb_hours / month_hours
 compute_pct        = floor(compute_core_hours / compute_limit × 100)
 storage_pct        = floor(storage_gb_month  / storage_limit  × 100)
-剩餘可跑小時(cores) = (compute_limit − compute_core_hours) / cores
+剩餘可跑小時(cores) = floor((compute_limit − compute_core_hours) / cores)   # 整數、向下取整
+重置倒數           = 下一個 UTC 月初 00:00 − now(UTC)                     # 7d22h / 5h / 42m
 ```
 
 - 額度預設 `GH_CSM_COMPUTE_LIMIT=120`、`GH_CSM_STORAGE_LIMIT=15`（GitHub Free）；Pro 為 180 / 20。
 - 顏色門檻：`<70` 綠、`70–89` 黃、`≥90` 紅（以整數百分比判斷）。
 - `storage_pct == 0` 但用量 > 0 → 顯示 `<1%`。
+- 剩餘時數一律向下取整（34.01 → `34`），不虛報。
+- 重置倒數格式：≥1 天 `7d22h`、<1 天 `5h`、<1 小時 `42m`。
 - 未知 SKU：印出警告並跳過（無法判定核數時不猜），**不得靜默丟棄**。
 - 2026-10 的 UTC 時數為 31 × 24 = 744，不是 720；`selftest` 以此為驗算基準。
 
@@ -146,31 +149,36 @@ gh csm help | --help | --version
 ### 4.2 dash 面板（每帳號一個）
 
 ```
-── <login> (active) ──────────────────────────────
-計費月 2026-10 (UTC)  ·  本地 2026-11-01（計費月以 UTC 為準）
-Compute  ████████░░░░░░░░░░░░  43%  已用 51.98 / 120 core-hrs
-         → 2-core 機器還能跑 ~34.01 小時；4-core 機器還能跑 ~17.01 小時
-Storage  ░░░░░░░░░░░░░░░░░░░░   <1%  已用 0.0073 / 15 GB-month（5.40 GB-h ÷ 744 h）
-Codespaces
-  NAME                                   STATE      MACHINE  LAST USED
-  foul-hobgoblin-qvvqx795q4qjf449r       Shutdown   2-core   2026-10-30 23:26  (持續吃 storage)
-建議
-  gh codespace delete -c foul-hobgoblin-qvvqx795q4qjf449r    # Shutdown 仍計 storage，刪除才停損
+── bb9755 · 2026-10 UTC · 離重置 7d22h ────
+Compute  ████████░░░░░░░░░░░░  43%   51.98/120 core-hrs · 剩 2-core 34h · 4-core 17h
+Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
+```
 
-Billing 約每小時結算一次，數字非即時。
+`--all`：每帳號一個面板、空行分隔，`(active)` 只在此模式出現；缺 `user` scope 的帳號壓成單行提示。
+
+```
+── bb9755 (active) · 2026-10 UTC · 離重置 7d22h ────
+Compute  ████████░░░░░░░░░░░░  43%   51.98/120 core-hrs · 剩 2-core 34h · 4-core 17h
+Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
+
+── BibbyChung · 2026-10 UTC · 離重置 7d22h ────
+  ⚠ 缺 user scope，解鎖：gh auth switch --user BibbyChung && gh auth refresh -h github.com -s user,codespace
 ```
 
 規則：
 
-1. 進度條寬度 20 格，`█` 已用 / `░` 未用。
-2. 月份標題固定 UTC；`local 月 ≠ UTC 月` 時加註「計費月以 UTC 為準」。
-3. `last_used_at` 轉本地時區顯示（RFC3339 → epoch → `date`，跨 darwin/GNU）。
-4. Shutdown 狀態在清單標註「持續吃 storage」。
-5. 行動建議：Shutdown 且有 storage 耗用 → `gh codespace delete`；其餘（執行中）→ `gh codespace stop`。
+1. header 固定 `── <login>[ (active)] · <YYYY-MM> UTC · 離重置 <countdown> ────`。
+2. 進度條寬度 20 格，`█` 已用 / `░` 未用；綠 `<70`、黃 `70–89`、紅 `≥90`。
+3. Compute 行：`<used>/<limit> core-hrs`（2 位小數）＋`剩 2-core <N>h · 4-core <M>h`；
+   時數整數向下取整，以粗體＋進度條同色標示（非 TTY / `NO_COLOR` 時退化為純文字）。
+4. Storage 行恆顯示（無顯示門檻）；`storage_pct == 0` 且用量 > 0 → `<1%`；數值 2 位小數；
+   不再顯示 GB-h ÷ 小時的換算細節。
+5. dash 不含 codespace 清單與行動建議（理由見 §9.1），**只呼叫 billing API**；
+   `fetch_codespaces` 僅供 `stop` 選單使用。
 6. 顏色只在 stdout 是 TTY 且 `NO_COLOR` 未設時輸出。
-7. 缺 `user` scope 的帳號：面板只顯示解鎖提示，不呼叫 billing API、不影響其他帳號。
-8. 缺 `codespace` scope：仍顯示額度，清單顯示解鎖提示。
-9. 頁尾固定一行結算延遲說明。
+7. 缺 `user` scope 的帳號：只顯示單行解鎖提示，不呼叫 billing API、不影響其他帳號。
+8. billing 失敗：stderr 單行錯誤＋面板單行提示，不中斷其他帳號。
+9. 無頁尾結算延遲註記；期待管理（約每小時結算一次）由 README 承接。
 
 ### 4.3 stop
 
@@ -208,9 +216,11 @@ Billing 約每小時結算一次，數字非即時。
 5. 色階邊界：69 綠、70 黃、89 黃、90 紅。
 6. 當月時數：2026-10 = 744、2026-02 = 672、2024-02 = 696。
 7. storage 換算：5.397 / 744 ≈ 0.0073 GB-month。
-8. 剩餘時數：(120 − 51.98)/2 ≈ 34.01、/4 ≈ 17.01。
+8. 剩餘時數（向下取整）：(120 − 51.98)/2 = 34、/4 = 17；額度用完 = 0。
 9. RFC3339 `+08:00` 與 `Z` 表示同一瞬間（時區轉換正確）。
 10. 進度條 0% / 100% 邊界。
+11. 重置倒數：固定 now epoch + 2026-10 → `7d22h`。
+12. 重置倒數跨年：2026-12 → 2027-01-01 前 5h → `5h`；不足 1 小時 → `42m`。
 
 任一失敗 → 印「期望 vs 實際」並 exit 1；全過 → exit 0。
 
@@ -227,7 +237,8 @@ Billing 約每小時結算一次，數字非即時。
 ### 5.2 計費月是 UTC
 
 本地 11/1 凌晨時 UTC 仍是 10/31，查「11 月」會拿到空陣列——這不是 bug。
-查詢鎖 UTC 月，顯示轉 local，交界期加註。
+查詢鎖 UTC 月；dash 的 header 與重置倒數也全走 UTC，所以不再另註本地交界。
+只有 `stop` 選單的 last used 轉成本地時間。
 
 ### 5.3 `netAmount == 0` 過濾會漏抓超額
 
@@ -248,8 +259,8 @@ grossAmount 0.028460376，即 ×0.07/730）。金額僅供參考，計算只用 
 
 ### 5.6 Shutdown 的 codespace 仍持續計 storage
 
-實測 shutdown 狀態每天仍有 +0.13~0.18 GB-h。所以「刪除優先於停止」，
-且 dash 只對 Shutdown + 有 storage 耗用的機器給 delete 建議。
+實測 shutdown 狀態每天仍有 +0.13~0.18 GB-h。所以「刪除優先於停止」。
+dash 不再列清單（§9.1）：要停用 `gh csm stop`，要真的止血用 `gh codespace delete`。
 
 ### 5.7 `gh auth refresh` 沒有 `--user`
 
@@ -286,7 +297,7 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 
 | 層級 | 方式 |
 |---|---|
-| 離線 | `gh-csm selftest`：內嵌真實 fixture 驗公式、SKU 解析、色階、時區轉換 |
+| 離線 | `gh-csm selftest`：內嵌真實 fixture 驗公式、SKU 解析、色階、時區轉換、重置倒數 |
 | 靜態 | `shellcheck gh-csm`（0 錯誤） |
 | 實機唯讀 | `gh csm dash`（active 帳號）、`--all`、`--account`（缺 scope 帳號走解鎖提示） |
 | 寫入操作 | `stop` / `run` 只驗參數解析與 scope 檢查，不在開發期實際執行 |
@@ -299,3 +310,36 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 - `ls` / `rm` / `ssh` 等原生子命令的再包裝（`gh codespace` 已有）。
 - 額度方案自動偵測（API 查不出 Free/Pro，只能靠環境變數覆寫）。
 - 跨 host（僅 `github.com`）。
+
+---
+
+## 8. 檔案結構與拆檔觸發線
+
+現況：單一執行檔 `gh-csm`（約 800 行）。拆檔不是目的，是規模的代價；未觸發前所有東西
+留在單檔，避免為了「看起來整齊」付出跨檔追蹤與 bootstrap 成本。
+
+**觸發條件（任一成立才拆）**：
+
+- 檔案超過約 1500 行。
+- 出現新子系統：`--watch` 常駐刷新、組態檔（如 `~/.config/gh-csm/`）、
+  JSON／其他機器可讀輸出格式。
+
+**拆法**：`lib/` 下按子系統切檔（`auth` / `billing` / `panel` / `selftest`），
+機械式 `git mv` 搬移後在 `gh-csm` 補路徑 bootstrap（`source "$(dirname "$0")/lib/*.sh"`），
+不改邏輯、不趁機重構；行為測試（`selftest`）必須在搬移前後輸出相同。
+
+---
+
+## 9. 設計決策記錄
+
+### 9.1 dash 極簡化（0.2.0）
+
+使用者實跑後回饋「資訊太多」，0.2.0 把 dash 收成三行：header（帳號／UTC 月／離重置倒數）
+＋ compute 一行 ＋ storage 一行。
+
+- **移除**：codespace 清單、行動建議、「建議」區塊、頁尾結算延遲註記、獨立計費月行、
+  本地／UTC 交界註記、GB-h ÷ 小時的換算細節。
+- **職責搬遷**：清單與「挑一個停掉」的操作本來就是 `stop` 的互動選單在做，dash 不再重複。
+- **副作用（正面）**：dash 只剩一次 billing API 呼叫，不再需要 `codespace` scope；
+  `fetch_codespaces` 保留給 `stop`。
+- **期待管理**：「約每小時結算一次」從輸出移到 README，需要時再查。

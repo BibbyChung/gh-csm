@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 BAR_WIDTH=20
 COMPUTE_LIMIT="${GH_CSM_COMPUTE_LIMIT:-120}"
 STORAGE_LIMIT="${GH_CSM_STORAGE_LIMIT:-15}"
@@ -18,7 +18,6 @@ AUTH_JSON=""
 BILL_YM=""
 BILL_YEAR=""
 BILL_MONTH=""
-LOCAL_YM=""
 
 # codespace 內建的 GITHUB_TOKEN 優先序高於 gh 的登入憑證，會讓所有查詢變成
 # 別的 token 身分（常見症狀：403 或「沒有 active 帳號」）。本工具一律以 gh
@@ -34,14 +33,12 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   C_GREEN=$'\033[32m'
   C_YELLOW=$'\033[33m'
   C_RED=$'\033[31m'
-  C_DIM=$'\033[2m'
   C_BOLD=$'\033[1m'
 else
   C_RESET=""
   C_GREEN=""
   C_YELLOW=""
   C_RED=""
-  C_DIM=""
   C_BOLD=""
 fi
 
@@ -62,7 +59,7 @@ gh-csm — GitHub Codespaces 額度監控與管理器
   gh csm help
 
 子命令:
-  dash        額度面板：compute / storage 用量、codespace 清單、行動建議
+  dash        額度面板：compute / storage 用量與離重置倒數
   stop        停止 codespace（無 -c 時為互動選單）
   run         喚醒 codespace 並執行 snippet；省略 snippet 則進互動 shell
   selftest    離線 fixture 自檢（不連網）
@@ -104,7 +101,6 @@ need_cmd() {
 
 # ---------- 數值（bash 3.2 沒有浮點，交給 awk） ----------
 
-fsub() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.10f\n", a - b }'; }
 fdiv() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.10f\n", a / b }'; }
 fgt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
 fclose() { awk -v a="$1" -v b="$2" -v t="$3" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= t) }'; }
@@ -115,6 +111,15 @@ pct() {
   awk -v used="$1" -v limit="$2" 'BEGIN {
     if (limit <= 0) { print 0; exit }
     printf "%d\n", (used / limit) * 100
+  }'
+}
+
+# 剩餘可跑時數：整數、向下取整（不虛報）。
+remaining_hours() {
+  awk -v used="$1" -v limit="$2" -v cores="$3" 'BEGIN {
+    left = limit - used
+    if (left < 0) left = 0
+    printf "%d\n", left / cores
   }'
 }
 
@@ -251,12 +256,36 @@ local_time() {
   fi
 }
 
+# 距離下一個 UTC 月初 00:00（額度重置點）的剩餘時間。now 為 epoch 秒，
+# 年月對應計費月；12 月要跨到隔年 1 月。
+reset_countdown() {
+  local now="$1" year="$2" month="$3" ny nm next left
+  ny="$year"
+  nm=$((month + 1))
+  if [ "$nm" -gt 12 ]; then
+    nm=1
+    ny=$((year + 1))
+  fi
+  next=$(epoch_from_iso "$(printf '%04d-%02d-01T00:00:00Z' "$ny" "$nm")") || {
+    printf '?\n'
+    return 0
+  }
+  left=$((next - now))
+  if [ "$left" -lt 0 ]; then left=0; fi
+  if [ "$left" -ge 86400 ]; then
+    printf '%dd%dh\n' $((left / 86400)) $(( (left % 86400) / 3600 ))
+  elif [ "$left" -ge 3600 ]; then
+    printf '%dh\n' $((left / 3600))
+  else
+    printf '%dm\n' $((left / 60))
+  fi
+}
+
 set_billing_period() {
   BILL_YM=$(date -u '+%Y-%m')
   BILL_YEAR="${BILL_YM%-*}"
   BILL_MONTH="${BILL_YM#*-}"
   BILL_MONTH="${BILL_MONTH#0}"
-  LOCAL_YM=$(date '+%Y-%m')
 }
 
 # ---------- gh 存取（token 只經環境變數傳遞） ----------
@@ -363,8 +392,7 @@ selected_accounts() {
 fetch_usage() {
   local login="$1" out
   if ! out=$(gh_as "$login" api "/users/$login/settings/billing/usage?year=$BILL_YEAR&month=$BILL_MONTH" 2>&1); then
-    warn "讀取 $login 的 billing 失敗：$(printf '%s' "$out" | head -n 1)"
-    warn "常見原因：token 缺 user scope、網路不通，或帳號不存在"
+    warn "讀取 $login 的 billing 失敗：$(printf '%s' "$out" | head -n 1)（缺 user scope／網路不通／帳號不存在）"
     return 1
   fi
   if ! printf '%s' "$out" | jq -e '.usageItems' >/dev/null 2>&1; then
@@ -417,85 +445,30 @@ fetch_codespaces() {
 # ---------- 面板 ----------
 
 print_panel_head() {
-  local login="$1" active="$2" title
+  local login="$1" active="$2" show_flag="$3" countdown="$4" title
   title="$login"
-  if [ "$active" = "yes" ]; then
+  if [ "$show_flag" -eq 1 ] && [ "$active" = "yes" ]; then
     title="$title (active)"
   fi
-  printf '%s── %s ──────────────────────────────%s\n' "$C_BOLD" "$title" "$C_RESET"
-  printf '計費月 %s (UTC)' "$BILL_YM"
-  if [ "$LOCAL_YM" != "$BILL_YM" ]; then
-    printf '  ·  本地 %s（計費月以 UTC 為準）' "$(date '+%Y-%m-%d')"
-  fi
-  printf '\n'
+  printf '%s── %s · %s UTC · 離重置 %s ────%s\n' \
+    "$C_BOLD" "$title" "$BILL_YM" "$countdown" "$C_RESET"
 }
 
 print_unlock_hint() {
-  local login="$1" active="$2"
-  printf '⚠ 此帳號的 token 缺 user scope，讀不到 billing 用量\n'
-  printf '  解鎖（一次性）：\n'
-  printf '    gh auth switch --user %s\n' "$login"
-  printf '    gh auth refresh -h github.com -s user,codespace\n'
-  if [ "$active" != "yes" ]; then
-    printf '    gh auth switch --user %s   # 切回原本的 active 帳號\n' "$(active_account)"
-  fi
-}
-
-print_codespace_table() {
-  local tsv="$1" name state cpus last machine note
-  printf '  %-38s %-10s %-8s %s\n' "NAME" "STATE" "MACHINE" "LAST USED"
-  while IFS=$'\t' read -r name state cpus last _; do
-    if [ -z "$name" ]; then
-      continue
-    fi
-    machine="${cpus}-core"
-    if [ "$cpus" = "0" ] || [ -z "$cpus" ]; then
-      machine="?"
-    fi
-    note=""
-    if [ "$state" = "Shutdown" ]; then
-      note="  (持續吃 storage)"
-    fi
-    printf '  %-38s %-10s %-8s %s%s\n' "$name" "$state" "$machine" "$(local_time "$last")" "$note"
-  done <<< "$tsv"
-}
-
-print_actions() {
-  local tsv="$1" login="$2" active="$3" storage="$4" name state cpus last out
-  out=""
-  if [ "$active" != "yes" ]; then
-    out="  ${C_DIM}非 active 帳號，先 gh auth switch --user $login${C_RESET}"$'\n'
-  fi
-  while IFS=$'\t' read -r name state cpus last _; do
-    if [ -z "$name" ]; then
-      continue
-    fi
-    if [ "$state" = "Shutdown" ]; then
-      if fgt "$storage" 0; then
-        out="$out  gh codespace delete -c $name    # Shutdown 仍計 storage，刪除才停損"$'\n'
-      fi
-    else
-      out="$out  gh codespace stop -c $name      # 停止 compute 計費"$'\n'
-    fi
-  done <<< "$tsv"
-  if [ -z "$out" ]; then
-    return 0
-  fi
-  printf '建議\n%s' "$out"
+  printf '  ⚠ 缺 user scope，解鎖：gh auth switch --user %s && gh auth refresh -h github.com -s user,codespace\n' "$1"
 }
 
 print_panel() {
-  local login="$1" active="$2" scopes usage totals compute storage hours gbm cpct spct label cs_tsv billing_ok
+  local login="$1" active="$2" show_flag="$3"
+  local scopes usage totals compute storage hours gbm cpct spct label color rem2 rem4
   scopes=$(account_scopes "$login")
-  print_panel_head "$login" "$active"
+  print_panel_head "$login" "$active" "$show_flag" "$(reset_countdown "$(date -u +%s)" "$BILL_YEAR" "$BILL_MONTH")"
 
   if ! has_scope "$scopes" user; then
-    print_unlock_hint "$login" "$active"
+    print_unlock_hint "$login"
     return 0
   fi
 
-  billing_ok=0
-  storage="0"
   if usage=$(fetch_usage "$login"); then
     totals=$(summarize_usage "$usage")
     compute="${totals%% *}"
@@ -504,41 +477,24 @@ print_panel() {
     gbm=$(fdiv "$storage" "$hours")
     cpct=$(pct "$compute" "$COMPUTE_LIMIT")
     spct=$(pct "$gbm" "$STORAGE_LIMIT")
+    color=$(color_code "$(color_for "$cpct")")
+    rem2=$(remaining_hours "$compute" "$COMPUTE_LIMIT" 2)
+    rem4=$(remaining_hours "$compute" "$COMPUTE_LIMIT" 4)
 
-    printf 'Compute  %s%s%s %3s%%  已用 %s / %s core-hrs\n' \
-      "$(color_code "$(color_for "$cpct")")" "$(bar "$cpct")" "$C_RESET" \
-      "$cpct" "$(fmt2 "$compute")" "$COMPUTE_LIMIT"
-    printf '         → 2-core 機器還能跑 ~%s 小時；4-core 機器還能跑 ~%s 小時\n' \
-      "$(fmt2 "$(fdiv "$(fsub "$COMPUTE_LIMIT" "$compute")" 2)")" \
-      "$(fmt2 "$(fdiv "$(fsub "$COMPUTE_LIMIT" "$compute")" 4)")"
+    printf 'Compute  %s%s%s %3s%%   %s/%s core-hrs · 剩 2-core %s%s%sh%s · 4-core %s%s%sh%s\n' \
+      "$color" "$(bar "$cpct")" "$C_RESET" "$cpct" \
+      "$(fmt2 "$compute")" "$COMPUTE_LIMIT" \
+      "$color" "$C_BOLD" "$rem2" "$C_RESET" \
+      "$color" "$C_BOLD" "$rem4" "$C_RESET"
     label="$spct"
     if [ "$spct" -eq 0 ] && fgt "$gbm" 0; then
       label="<1"
     fi
-    printf 'Storage  %s%s%s %4s%%  已用 %s / %s GB-month（%s GB-h ÷ %s h）\n' \
+    printf 'Storage  %s%s%s %4s%%   %s/%s GB-month\n' \
       "$(color_code "$(color_for "$spct")")" "$(bar "$spct")" "$C_RESET" \
-      "$label" "$(fmt4 "$gbm")" "$STORAGE_LIMIT" "$(fmt2 "$storage")" "$hours"
-    billing_ok=1
+      "$label" "$(fmt2 "$gbm")" "$STORAGE_LIMIT"
   else
-    printf 'Compute / Storage  無法取得用量（見上方錯誤）\n'
-  fi
-
-  printf 'Codespaces\n'
-  if ! has_scope "$scopes" codespace; then
-    printf '  ⚠ 缺 codespace scope，無法列出。解鎖：gh auth refresh -h github.com -s codespace\n'
-    return 0
-  fi
-  if cs_tsv=$(fetch_codespaces "$login"); then
-    if [ -z "$cs_tsv" ]; then
-      printf '  （無）\n'
-      return 0
-    fi
-    print_codespace_table "$cs_tsv"
-    if [ "$billing_ok" -eq 1 ]; then
-      print_actions "$cs_tsv" "$login" "$active" "$storage"
-    fi
-  else
-    printf '  ⚠ 讀取失敗\n'
+    printf '  ⚠ 無法取得用量（見上方錯誤）\n'
   fi
 }
 
@@ -596,9 +552,8 @@ cmd_dash() {
       printf '\n'
     fi
     first=0
-    print_panel "$acct" "$(account_is_active "$acct")"
+    print_panel "$acct" "$(account_is_active "$acct")" "$ALL"
   done
-  printf '\n%sBilling 約每小時結算一次，數字非即時。%s\n' "$C_DIM" "$C_RESET"
 }
 
 cmd_stop() {
@@ -803,9 +758,17 @@ cmd_selftest() {
   gbm=$(fdiv "$storage" "$hours")
   st_near "5.397 GB-h ÷ 744 = 0.0073 GB-month" "0.0073" "$(fmt4 "$gbm")" "0.0001"
 
-  # 剩餘時數換算
-  st_near "(120-51.98)/2 ≈ 34.01 h" "34.01" "$(fmt2 "$(fdiv "$(fsub 120 "$compute")" 2)")" "0.01"
-  st_near "(120-51.98)/4 ≈ 17.01 h" "17.01" "$(fmt2 "$(fdiv "$(fsub 120 "$compute")" 4)")" "0.01"
+  # 剩餘時數換算（整數、向下取整）
+  st_eq "(120-51.98)/2 = 34h" "34" "$(remaining_hours "$compute" 120 2)"
+  st_eq "(120-51.98)/4 = 17h" "17" "$(remaining_hours "$compute" 120 4)"
+  st_eq "額度用完 = 0h" "0" "$(remaining_hours 130 120 2)"
+
+  # 離重置倒數（固定 now epoch，對特定計費月）
+  st_eq "倒數 2026-10 剩 7d22h" "7d22h" "$(reset_countdown 1792807200 2026 10)"
+  st_eq "倒數 12 月跨年（2027-01-01 前 5h）" "5h" \
+    "$(reset_countdown "$(epoch_from_iso '2026-12-31T19:00:00Z')" 2026 12)"
+  st_eq "倒數不足 1 小時 = 42m" "42m" \
+    "$(reset_countdown "$(epoch_from_iso '2026-10-31T23:18:00Z')" 2026 10)"
 
   # 時區轉換：offset 與 Z 必須指同一瞬間
   epoch_a=$(epoch_from_iso '2026-10-30T23:26:35+08:00')

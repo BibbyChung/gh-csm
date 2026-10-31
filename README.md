@@ -5,25 +5,29 @@ compute / storage 額度，順手停掉或喚醒 codespace。
 
 ```
 $ gh csm dash
-── bb9755 (active) ──────────────────────────────
-計費月 2026-10 (UTC)  ·  本地 2026-11-01（計費月以 UTC 為準）
-Compute  ████████░░░░░░░░░░░░  43%  已用 51.98 / 120 core-hrs
-         → 2-core 機器還能跑 ~34.01 小時；4-core 機器還能跑 ~17.01 小時
-Storage  ░░░░░░░░░░░░░░░░░░░░   <1%  已用 0.0073 / 15 GB-month（5.40 GB-h ÷ 744 h）
-Codespaces
-  NAME                                   STATE      MACHINE  LAST USED
-  foul-hobgoblin-qvvqx795q4qjf449r       Shutdown   2-core   2026-10-30 23:26  (持續吃 storage)
-建議
-  gh codespace delete -c foul-hobgoblin-qvvqx795q4qjf449r    # Shutdown 仍計 storage，刪除才停損
+── bb9755 · 2026-10 UTC · 離重置 7d22h ────
+Compute  ████████░░░░░░░░░░░░  43%   51.98/120 core-hrs · 剩 2-core 34h · 4-core 17h
+Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
+```
 
-Billing 約每小時結算一次，數字非即時。
+`--all` 每個帳號一個面板，`(active)` 標在 header；沒解鎖 `user` scope 的帳號只留一行提示：
+
+```
+$ gh csm dash --all
+── bb9755 (active) · 2026-10 UTC · 離重置 7d22h ────
+Compute  ████████░░░░░░░░░░░░  43%   51.98/120 core-hrs · 剩 2-core 34h · 4-core 17h
+Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
+
+── BibbyChung · 2026-10 UTC · 離重置 7d22h ────
+  ⚠ 缺 user scope，解鎖：gh auth switch --user BibbyChung && gh auth refresh -h github.com -s user,codespace
 ```
 
 ## 功能
 
-- **dash**：compute / storage 進度條（綠 <70%、黃 70–89%、紅 ≥90%），
-  依剩餘 core-hours 換算 2-core / 4-core 還能跑幾小時，列出該帳號的 codespace
-  （狀態、核數、最後使用時間），並給可直接複製的行動指令。
+- **dash**：三行看完——compute / storage 進度條（綠 <70%、黃 70–89%、紅 ≥90%），
+  依剩餘 core-hours 換算 2-core / 4-core 還能跑幾小時（整數、向下取整，不虛報），
+  header 帶距離額度重置的倒數（`7d22h` / `5h` / `42m`）。
+  清單與操作交給 `stop`，dash 只打一次 billing API。
 - **stop**：不帶參數是互動選單（編號選、再確認）；`-c <name>` 直接停。
 - **run**：喚醒 codespace 後執行 snippet，或省略 snippet 直接進互動 shell
   （stopped 的 codespace 會自動喚醒）。
@@ -71,7 +75,7 @@ gh auth refresh -h github.com -s user,codespace
 gh auth switch --user your-main-account
 ```
 
-沒解鎖的帳號不會讓整個 dashboard 爆掉——該帳號面板只會顯示上面這串解鎖指令，
+沒解鎖的帳號不會讓整個 dashboard 爆掉——該帳號面板只留一行解鎖指令，
 其他帳號照常顯示。
 
 ## 使用方式
@@ -112,8 +116,8 @@ API 查不出帳號方案別，所以只能自己設定。
 ## 限制（誠實揭露）
 
 - **數字有延遲**：GitHub billing 約每小時結算一次，剛停掉的 codespace 不會馬上反映。
-- **計費月是 UTC**：本地時間月底／月初可能與 UTC 不同月，面板會在交界期加註。
-  查詢固定鎖 UTC 月，顯示的時間才轉本地。
+- **計費月是 UTC**：dash 的月份與重置倒數都走 UTC。本地時間月底／月初可能與 UTC 落在不同月，
+  屬正常現象；`stop` 選單的 last used 才轉本地時區。
 - **Shutdown 仍吃 storage**：停止只停 compute，儲存空間繼續計費。想真的止血要刪除。
 - **刪除不影響已產生的帳**：計費紀錄不會因為刪掉 codespace 而消失。
 - **classic OAuth only**：billing 端點不接受 fine-grained PAT，只能用 `gh auth refresh` 解鎖。
