@@ -1,0 +1,868 @@
+#!/usr/bin/env bash
+#
+# gh-csm — GitHub Codespaces quota dashboard & manager (gh extension).
+#
+# Requires: bash 3.2+, gh, jq. See README.md and SPEC.md.
+#
+# Why the code looks conservative: macOS ships /bin/bash 3.2.57, so no
+# associative arrays, no mapfile/readarray, no ${var,,}, no &>>.
+
+set -euo pipefail
+
+VERSION="0.1.0"
+BAR_WIDTH=20
+COMPUTE_LIMIT="${GH_CSM_COMPUTE_LIMIT:-120}"
+STORAGE_LIMIT="${GH_CSM_STORAGE_LIMIT:-15}"
+
+AUTH_JSON=""
+BILL_YM=""
+BILL_YEAR=""
+BILL_MONTH=""
+LOCAL_YM=""
+
+# codespace 內建的 GITHUB_TOKEN 優先序高於 gh 的登入憑證，會讓所有查詢變成
+# 別的 token 身分（常見症狀：403 或「沒有 active 帳號」）。本工具一律以 gh
+# 登入的帳號為準，所以在自己的 process 內丟掉它。
+GH_CSM_IGNORED_TOKEN=0
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  unset GITHUB_TOKEN
+  GH_CSM_IGNORED_TOKEN=1
+fi
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_RESET=$'\033[0m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_RED=$'\033[31m'
+  C_DIM=$'\033[2m'
+  C_BOLD=$'\033[1m'
+else
+  C_RESET=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_RED=""
+  C_DIM=""
+  C_BOLD=""
+fi
+
+case "$(uname -s)" in
+  Darwin|FreeBSD|OpenBSD|NetBSD) DATE_STYLE="bsd" ;;
+  *) DATE_STYLE="gnu" ;;
+esac
+
+usage() {
+  cat <<'EOF'
+gh-csm — GitHub Codespaces 額度監控與管理器
+
+用法:
+  gh csm dash [--account <login> | --all]
+  gh csm stop [-c <name>] [--account <login>]
+  gh csm run -c <name> [snippet] [--account <login>]
+  gh csm selftest
+  gh csm help
+
+子命令:
+  dash        額度面板：compute / storage 用量、codespace 清單、行動建議
+  stop        停止 codespace（無 -c 時為互動選單）
+  run         喚醒 codespace 並執行 snippet；省略 snippet 則進互動 shell
+  selftest    離線 fixture 自檢（不連網）
+
+帳號:
+  預設使用 gh 的 active 帳號。
+  --account <login>   指定已登入的帳號
+  --all               所有已登入帳號，面板垂直堆疊（僅 dash）
+
+額度上限（預設 GitHub Free）:
+  GH_CSM_COMPUTE_LIMIT=120   core-hours / 月
+  GH_CSM_STORAGE_LIMIT=15    GB-month / 月
+  Pro 帳號：GH_CSM_COMPUTE_LIMIT=180 GH_CSM_STORAGE_LIMIT=20 gh csm dash
+
+需求:
+  gh（已 gh auth login，需 user 與 codespace scope）、jq
+  缺 scope 解鎖：gh auth switch --user <login> && gh auth refresh -h github.com -s user,codespace
+
+例:
+  gh csm dash
+  gh csm dash --all
+  gh csm stop
+  gh csm run -c my-codespace 'echo gogogo...'
+EOF
+}
+
+die() {
+  printf 'gh-csm: %s\n' "$*" >&2
+  exit 1
+}
+
+warn() {
+  printf 'gh-csm: %s\n' "$*" >&2
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "找不到 $1，請先安裝"
+}
+
+# ---------- 數值（bash 3.2 沒有浮點，交給 awk） ----------
+
+fsub() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.10f\n", a - b }'; }
+fdiv() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.10f\n", a / b }'; }
+fgt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+fclose() { awk -v a="$1" -v b="$2" -v t="$3" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= t) }'; }
+fmt2() { awk -v a="$1" 'BEGIN { printf "%.2f", a }'; }
+fmt4() { awk -v a="$1" 'BEGIN { printf "%.4f", a }'; }
+
+pct() {
+  awk -v used="$1" -v limit="$2" 'BEGIN {
+    if (limit <= 0) { print 0; exit }
+    printf "%d\n", (used / limit) * 100
+  }'
+}
+
+is_positive_number() {
+  awk -v v="$1" 'BEGIN { exit !(v ~ /^[0-9]+([.][0-9]+)?$/ && v + 0 > 0) }'
+}
+
+validate_limits() {
+  is_positive_number "$COMPUTE_LIMIT" || die "GH_CSM_COMPUTE_LIMIT 必須是正數（目前：${COMPUTE_LIMIT}）"
+  is_positive_number "$STORAGE_LIMIT" || die "GH_CSM_STORAGE_LIMIT 必須是正數（目前：${STORAGE_LIMIT}）"
+}
+
+# ---------- 領域邏輯 ----------
+
+# SKU 是人類可讀字串（"Codespaces compute 4-core"），不可硬編 d2/d4 這類 id。
+sku_cores() {
+  local sku="$1" n
+  case "$sku" in
+    "Codespaces compute "[0-9]*-core)
+      n="${sku#Codespaces compute }"
+      n="${n%-core}"
+      printf '%s\n' "$n"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+days_in_month() {
+  local y="$1" m="$2"
+  case "$m" in
+    1|3|5|7|8|10|12) printf '31\n' ;;
+    4|6|9|11) printf '30\n' ;;
+    2)
+      if [ $((y % 4)) -eq 0 ] && { [ $((y % 100)) -ne 0 ] || [ $((y % 400)) -eq 0 ]; }; then
+        printf '29\n'
+      else
+        printf '28\n'
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+month_hours() {
+  local days
+  days=$(days_in_month "$1" "$2") || return 1
+  printf '%s\n' $((days * 24))
+}
+
+color_for() {
+  local p="$1"
+  if [ "$p" -ge 90 ]; then
+    printf 'red'
+  elif [ "$p" -ge 70 ]; then
+    printf 'yellow'
+  else
+    printf 'green'
+  fi
+}
+
+color_code() {
+  case "$1" in
+    green) printf '%s' "$C_GREEN" ;;
+    yellow) printf '%s' "$C_YELLOW" ;;
+    red) printf '%s' "$C_RED" ;;
+    *) printf '%s' "$C_RESET" ;;
+  esac
+}
+
+bar() {
+  local p="$1" filled i out
+  filled=$((p * BAR_WIDTH / 100))
+  if [ "$filled" -gt "$BAR_WIDTH" ]; then filled=$BAR_WIDTH; fi
+  if [ "$filled" -lt 0 ]; then filled=0; fi
+  out=""
+  i=0
+  while [ "$i" -lt "$filled" ]; do
+    out="${out}█"
+    i=$((i + 1))
+  done
+  while [ "$i" -lt "$BAR_WIDTH" ]; do
+    out="${out}░"
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+# RFC3339（含 Z 或 ±HH:MM）→ epoch 秒，純算術、跨平台。
+epoch_from_iso() {
+  awk -v ts="$1" 'BEGIN {
+    s = ts
+    off = 0
+    if (match(s, /[+-][0-9][0-9]:[0-9][0-9]$/)) {
+      sign = substr(s, RSTART, 1)
+      hh = substr(s, RSTART + 1, 2) + 0
+      mm = substr(s, RSTART + 4, 2) + 0
+      off = hh * 3600 + mm * 60
+      if (sign == "-") off = -off
+      s = substr(s, 1, RSTART - 1)
+    }
+    sub(/Z$/, "", s)
+    if (s !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$/) exit 1
+    y = substr(s, 1, 4) + 0
+    mo = substr(s, 6, 2) + 0
+    d = substr(s, 9, 2) + 0
+    h = substr(s, 12, 2) + 0
+    mi = substr(s, 15, 2) + 0
+    se = substr(s, 18, 2) + 0
+    yy = y
+    if (mo <= 2) yy = yy - 1
+    era = int(yy / 400)
+    yoe = yy - era * 400
+    doy = int((153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5) + d - 1
+    doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+    printf "%d\n", (era * 146097 + doe - 719468) * 86400 + h * 3600 + mi * 60 + se - off
+    exit 0
+  }'
+}
+
+local_time() {
+  local ts="$1" epoch
+  case "$ts" in
+    ""|null) printf '-' ; return 0 ;;
+  esac
+  if ! epoch=$(epoch_from_iso "$ts"); then
+    printf '%s' "$ts"
+    return 0
+  fi
+  if [ "$DATE_STYLE" = "bsd" ]; then
+    date -r "$epoch" '+%Y-%m-%d %H:%M' 2>/dev/null || printf '%s' "$ts"
+  else
+    date -d "@$epoch" '+%Y-%m-%d %H:%M' 2>/dev/null || printf '%s' "$ts"
+  fi
+}
+
+set_billing_period() {
+  BILL_YM=$(date -u '+%Y-%m')
+  BILL_YEAR="${BILL_YM%-*}"
+  BILL_MONTH="${BILL_YM#*-}"
+  BILL_MONTH="${BILL_MONTH#0}"
+  LOCAL_YM=$(date '+%Y-%m')
+}
+
+# ---------- gh 存取（token 只經環境變數傳遞） ----------
+
+load_auth() {
+  if [ -n "$AUTH_JSON" ]; then
+    return 0
+  fi
+  need_cmd gh
+  need_cmd jq
+  if [ "$GH_CSM_IGNORED_TOKEN" -eq 1 ]; then
+    warn "已忽略環境變數 GITHUB_TOKEN（會蓋掉 gh 登入身分，codespace 內常見）"
+  fi
+  if ! AUTH_JSON=$(gh auth status --json hosts 2>/dev/null); then
+    die "gh 未登入或 gh 版本過舊（需 2.40+）。先跑：gh auth login"
+  fi
+  if [ -z "$AUTH_JSON" ]; then
+    die "讀不到 gh 登入狀態，先跑：gh auth login"
+  fi
+}
+
+list_accounts() {
+  printf '%s' "$AUTH_JSON" | jq -r '.hosts["github.com"][]? | .login'
+}
+
+accounts_inline() {
+  list_accounts | awk 'NR > 1 { printf " " } { printf "%s", $0 }'
+}
+
+active_account() {
+  printf '%s' "$AUTH_JSON" | jq -r '[.hosts["github.com"][]? | select(.active == true)] | .[0].login // empty'
+}
+
+account_scopes() {
+  printf '%s' "$AUTH_JSON" | jq -r --arg login "$1" '.hosts["github.com"][]? | select(.login == $login) | .scopes // ""'
+}
+
+account_is_active() {
+  local v
+  v=$(printf '%s' "$AUTH_JSON" | jq -r --arg login "$1" '.hosts["github.com"][]? | select(.login == $login) | .active')
+  if [ "$v" = "true" ]; then
+    printf 'yes'
+  else
+    printf 'no'
+  fi
+}
+
+has_scope() {
+  case ",${1// /}," in
+    *",$2,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+require_scope() {
+  local scopes
+  scopes=$(account_scopes "$1")
+  if has_scope "$scopes" "$2"; then
+    return 0
+  fi
+  die "帳號 $1 缺 $2 scope。解鎖：gh auth switch --user $1 && gh auth refresh -h github.com -s user,codespace"
+}
+
+# GITHUB_TOKEN（codespace 內建）優先序高於 GH_TOKEN，會蓋掉登入身分 → 明確移除。
+gh_as() {
+  local login="$1"
+  shift
+  local tok
+  if ! tok=$(gh auth token --user "$login" 2>/dev/null); then
+    die "取不到 $login 的 token，先跑：gh auth login"
+  fi
+  env -u GITHUB_TOKEN GH_TOKEN="$tok" gh "$@"
+}
+
+resolve_login() {
+  local login
+  if [ "$ALL" -eq 1 ]; then
+    die "--all 不適用此子命令"
+  fi
+  if [ -n "$ACCOUNT" ]; then
+    if ! list_accounts | grep -qxF -- "$ACCOUNT"; then
+      die "找不到已登入的帳號 ${ACCOUNT}（已登入：$(accounts_inline)）"
+    fi
+    printf '%s\n' "$ACCOUNT"
+    return 0
+  fi
+  login=$(active_account)
+  if [ -z "$login" ]; then
+    die "沒有 active 帳號，請指定 --account <login>"
+  fi
+  printf '%s\n' "$login"
+}
+
+selected_accounts() {
+  if [ "$ALL" -eq 1 ]; then
+    list_accounts
+  else
+    resolve_login
+  fi
+}
+
+# ---------- billing ----------
+
+fetch_usage() {
+  local login="$1" out
+  if ! out=$(gh_as "$login" api "/users/$login/settings/billing/usage?year=$BILL_YEAR&month=$BILL_MONTH" 2>&1); then
+    warn "讀取 $login 的 billing 失敗：$(printf '%s' "$out" | head -n 1)"
+    warn "常見原因：token 缺 user scope、網路不通，或帳號不存在"
+    return 1
+  fi
+  if ! printf '%s' "$out" | jq -e '.usageItems' >/dev/null 2>&1; then
+    warn "$login 的 billing 回應不是預期 JSON（可能被 proxy 或 HTML 攔截）"
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+sum_compute() {
+  awk -F'\t' '{ total += $1 * $2 } END { printf "%.10f\n", total }'
+}
+
+sum_quantity() {
+  awk '{ total += $1 } END { printf "%.10f\n", total }'
+}
+
+# 用量一律用 quantity（machine-hours / GigabyteHours），不用金額欄位。
+summarize_usage() {
+  local json="$1" rows sku qty cores compute_tsv storage_tsv
+  rows=$(printf '%s' "$json" | jq -r '.usageItems[]? | select(.product == "codespaces") | [.sku, .quantity] | @tsv')
+  compute_tsv=""
+  storage_tsv=""
+  while IFS=$'\t' read -r sku qty; do
+    if [ -z "$sku" ]; then
+      continue
+    fi
+    if [ "$sku" = "Codespaces storage" ]; then
+      storage_tsv="$storage_tsv$qty"$'\n'
+      continue
+    fi
+    if cores=$(sku_cores "$sku"); then
+      compute_tsv="$compute_tsv$cores"$'\t'"$qty"$'\n'
+    else
+      warn "未知 SKU「${sku}」已跳過（無法判定核數，不計入額度）"
+    fi
+  done <<< "$rows"
+  printf '%s %s\n' "$(printf '%s' "$compute_tsv" | sum_compute)" "$(printf '%s' "$storage_tsv" | sum_quantity)"
+}
+
+fetch_codespaces() {
+  local login="$1" out
+  if ! out=$(gh_as "$login" api "/user/codespaces?per_page=100" 2>&1); then
+    warn "讀取 $login 的 codespace 清單失敗：$(printf '%s' "$out" | head -n 1)"
+    return 1
+  fi
+  printf '%s' "$out" | jq -r '.codespaces[]? | [.name, .state, ((.machine.cpus // 0) | tostring), (.last_used_at // ""), (.repository.full_name // "")] | @tsv'
+}
+
+# ---------- 面板 ----------
+
+print_panel_head() {
+  local login="$1" active="$2" title
+  title="$login"
+  if [ "$active" = "yes" ]; then
+    title="$title (active)"
+  fi
+  printf '%s── %s ──────────────────────────────%s\n' "$C_BOLD" "$title" "$C_RESET"
+  printf '計費月 %s (UTC)' "$BILL_YM"
+  if [ "$LOCAL_YM" != "$BILL_YM" ]; then
+    printf '  ·  本地 %s（計費月以 UTC 為準）' "$(date '+%Y-%m-%d')"
+  fi
+  printf '\n'
+}
+
+print_unlock_hint() {
+  local login="$1" active="$2"
+  printf '⚠ 此帳號的 token 缺 user scope，讀不到 billing 用量\n'
+  printf '  解鎖（一次性）：\n'
+  printf '    gh auth switch --user %s\n' "$login"
+  printf '    gh auth refresh -h github.com -s user,codespace\n'
+  if [ "$active" != "yes" ]; then
+    printf '    gh auth switch --user %s   # 切回原本的 active 帳號\n' "$(active_account)"
+  fi
+}
+
+print_codespace_table() {
+  local tsv="$1" name state cpus last machine note
+  printf '  %-38s %-10s %-8s %s\n' "NAME" "STATE" "MACHINE" "LAST USED"
+  while IFS=$'\t' read -r name state cpus last _; do
+    if [ -z "$name" ]; then
+      continue
+    fi
+    machine="${cpus}-core"
+    if [ "$cpus" = "0" ] || [ -z "$cpus" ]; then
+      machine="?"
+    fi
+    note=""
+    if [ "$state" = "Shutdown" ]; then
+      note="  (持續吃 storage)"
+    fi
+    printf '  %-38s %-10s %-8s %s%s\n' "$name" "$state" "$machine" "$(local_time "$last")" "$note"
+  done <<< "$tsv"
+}
+
+print_actions() {
+  local tsv="$1" login="$2" active="$3" storage="$4" name state cpus last out
+  out=""
+  if [ "$active" != "yes" ]; then
+    out="  ${C_DIM}非 active 帳號，先 gh auth switch --user $login${C_RESET}"$'\n'
+  fi
+  while IFS=$'\t' read -r name state cpus last _; do
+    if [ -z "$name" ]; then
+      continue
+    fi
+    if [ "$state" = "Shutdown" ]; then
+      if fgt "$storage" 0; then
+        out="$out  gh codespace delete -c $name    # Shutdown 仍計 storage，刪除才停損"$'\n'
+      fi
+    else
+      out="$out  gh codespace stop -c $name      # 停止 compute 計費"$'\n'
+    fi
+  done <<< "$tsv"
+  if [ -z "$out" ]; then
+    return 0
+  fi
+  printf '建議\n%s' "$out"
+}
+
+print_panel() {
+  local login="$1" active="$2" scopes usage totals compute storage hours gbm cpct spct label cs_tsv billing_ok
+  scopes=$(account_scopes "$login")
+  print_panel_head "$login" "$active"
+
+  if ! has_scope "$scopes" user; then
+    print_unlock_hint "$login" "$active"
+    return 0
+  fi
+
+  billing_ok=0
+  storage="0"
+  if usage=$(fetch_usage "$login"); then
+    totals=$(summarize_usage "$usage")
+    compute="${totals%% *}"
+    storage="${totals##* }"
+    hours=$(month_hours "$BILL_YEAR" "$BILL_MONTH")
+    gbm=$(fdiv "$storage" "$hours")
+    cpct=$(pct "$compute" "$COMPUTE_LIMIT")
+    spct=$(pct "$gbm" "$STORAGE_LIMIT")
+
+    printf 'Compute  %s%s%s %3s%%  已用 %s / %s core-hrs\n' \
+      "$(color_code "$(color_for "$cpct")")" "$(bar "$cpct")" "$C_RESET" \
+      "$cpct" "$(fmt2 "$compute")" "$COMPUTE_LIMIT"
+    printf '         → 2-core 機器還能跑 ~%s 小時；4-core 機器還能跑 ~%s 小時\n' \
+      "$(fmt2 "$(fdiv "$(fsub "$COMPUTE_LIMIT" "$compute")" 2)")" \
+      "$(fmt2 "$(fdiv "$(fsub "$COMPUTE_LIMIT" "$compute")" 4)")"
+    label="$spct"
+    if [ "$spct" -eq 0 ] && fgt "$gbm" 0; then
+      label="<1"
+    fi
+    printf 'Storage  %s%s%s %4s%%  已用 %s / %s GB-month（%s GB-h ÷ %s h）\n' \
+      "$(color_code "$(color_for "$spct")")" "$(bar "$spct")" "$C_RESET" \
+      "$label" "$(fmt4 "$gbm")" "$STORAGE_LIMIT" "$(fmt2 "$storage")" "$hours"
+    billing_ok=1
+  else
+    printf 'Compute / Storage  無法取得用量（見上方錯誤）\n'
+  fi
+
+  printf 'Codespaces\n'
+  if ! has_scope "$scopes" codespace; then
+    printf '  ⚠ 缺 codespace scope，無法列出。解鎖：gh auth refresh -h github.com -s codespace\n'
+    return 0
+  fi
+  if cs_tsv=$(fetch_codespaces "$login"); then
+    if [ -z "$cs_tsv" ]; then
+      printf '  （無）\n'
+      return 0
+    fi
+    print_codespace_table "$cs_tsv"
+    if [ "$billing_ok" -eq 1 ]; then
+      print_actions "$cs_tsv" "$login" "$active" "$storage"
+    fi
+  else
+    printf '  ⚠ 讀取失敗\n'
+  fi
+}
+
+# ---------- 子命令 ----------
+
+parse_account_flags() {
+  # 設定 ACCOUNT / ALL，其餘參數留在 REST 陣列
+  ACCOUNT=""
+  ALL=0
+  REST=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --account)
+        if [ $# -lt 2 ]; then die "--account 需要 <login>"; fi
+        ACCOUNT="$2"
+        shift 2
+        ;;
+      --account=*)
+        ACCOUNT="${1#*=}"
+        shift
+        ;;
+      --all)
+        ALL=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        REST+=("$1")
+        shift
+        ;;
+    esac
+  done
+}
+
+cmd_dash() {
+  local accounts acct first
+  parse_account_flags "$@"
+  if [ "${#REST[@]}" -gt 0 ]; then
+    die "dash 不認識參數：${REST[0]}（試試 gh csm help）"
+  fi
+  validate_limits
+  load_auth
+  set_billing_period
+  accounts=$(selected_accounts)
+  if [ -z "$accounts" ]; then
+    die "沒有已登入的帳號，先跑：gh auth login"
+  fi
+  first=1
+  for acct in $accounts; do
+    if [ "$first" -eq 0 ]; then
+      printf '\n'
+    fi
+    first=0
+    print_panel "$acct" "$(account_is_active "$acct")"
+  done
+  printf '\n%sBilling 約每小時結算一次，數字非即時。%s\n' "$C_DIM" "$C_RESET"
+}
+
+cmd_stop() {
+  local name login cs i choice sel_name sel_state ans n s c l
+  name=""
+  parse_account_flags "$@"
+  if [ "${#REST[@]}" -gt 0 ]; then
+    case "${REST[0]}" in
+      -c|--codespace)
+        if [ "${#REST[@]}" -lt 2 ]; then die "-c 需要 <name>"; fi
+        name="${REST[1]}"
+        if [ "${#REST[@]}" -gt 2 ]; then die "stop 只接受一個 -c <name>"; fi
+        ;;
+      *) die "stop 不認識參數：${REST[0]}（試試 gh csm help）" ;;
+    esac
+  fi
+  validate_limits
+  load_auth
+  login=$(resolve_login)
+  require_scope "$login" codespace
+
+  if [ -n "$name" ]; then
+    printf '停止 %s（帳號 %s）…\n' "$name" "$login"
+    gh_as "$login" codespace stop -c "$name"
+    return 0
+  fi
+
+  if [ ! -t 0 ]; then
+    die "非互動環境請用：gh csm stop -c <name>"
+  fi
+  if ! cs=$(fetch_codespaces "$login"); then
+    die "讀不到 $login 的 codespace 清單"
+  fi
+  if [ -z "$cs" ]; then
+    die "帳號 $login 目前沒有 codespace"
+  fi
+
+  i=1
+  while IFS=$'\t' read -r n s c l _; do
+    if [ -z "$n" ]; then
+      continue
+    fi
+    printf '  %2d) %-38s %-10s %s-core  last used %s\n' "$i" "$n" "$s" "$c" "$(local_time "$l")"
+    i=$((i + 1))
+  done <<< "$cs"
+
+  printf '選擇要停止的編號（q 取消）：'
+  read -r choice || die "沒有輸入"
+  case "$choice" in
+    q|Q) printf '已取消\n' ; return 0 ;;
+    ''|*[!0-9]*) die "請輸入數字編號" ;;
+  esac
+
+  sel_name=""
+  sel_state=""
+  i=1
+  while IFS=$'\t' read -r n s c l _; do
+    if [ -z "$n" ]; then
+      continue
+    fi
+    if [ "$i" -eq "$choice" ]; then
+      sel_name="$n"
+      sel_state="$s"
+    fi
+    i=$((i + 1))
+  done <<< "$cs"
+  if [ -z "$sel_name" ]; then
+    die "編號 $choice 超出範圍"
+  fi
+  if [ "$sel_state" = "Shutdown" ]; then
+    die "$sel_name 已經是 Shutdown（想省 storage 請用 gh codespace delete -c ${sel_name}）"
+  fi
+
+  printf '停止 %s？[y/N] ' "$sel_name"
+  read -r ans || ans=""
+  case "$ans" in
+    y|Y|yes|YES) ;;
+    *) printf '已取消\n' ; return 0 ;;
+  esac
+  gh_as "$login" codespace stop -c "$sel_name"
+}
+
+cmd_run() {
+  local name snippet have_snippet login arg idx
+  name=""
+  snippet=""
+  have_snippet=0
+  parse_account_flags "$@"
+  if [ "${#REST[@]}" -gt 0 ]; then
+    case "${REST[0]}" in
+      -c|--codespace)
+        if [ "${#REST[@]}" -lt 2 ]; then die "-c 需要 <name>"; fi
+        name="${REST[1]}"
+        idx=2
+        while [ "$idx" -lt "${#REST[@]}" ]; do
+          arg="${REST[$idx]}"
+          if [ -z "$snippet" ]; then
+            snippet="$arg"
+          else
+            snippet="$snippet $arg"
+          fi
+          have_snippet=1
+          idx=$((idx + 1))
+        done
+        ;;
+      *) die "run 不認識參數：${REST[0]}（試試 gh csm help）" ;;
+    esac
+  fi
+  if [ -z "$name" ]; then
+    die "run 需要 -c <name>"
+  fi
+  validate_limits
+  load_auth
+  login=$(resolve_login)
+  require_scope "$login" codespace
+
+  if [ "$have_snippet" -eq 1 ]; then
+    printf '喚醒 %s 並執行：%s\n' "$name" "$snippet"
+    gh_as "$login" codespace ssh -c "$name" -- "$snippet"
+  else
+    printf '喚醒 %s 並進入 shell…\n' "$name"
+    gh_as "$login" codespace ssh -c "$name"
+  fi
+}
+
+# ---------- selftest（零網路） ----------
+
+ST_PASS=0
+ST_FAIL=0
+
+st_ok() {
+  ST_PASS=$((ST_PASS + 1))
+  printf '  ok   %s\n' "$1"
+}
+
+st_bad() {
+  ST_FAIL=$((ST_FAIL + 1))
+  printf '  FAIL %s（期望 %s，實際 %s）\n' "$1" "$2" "$3"
+}
+
+st_eq() {
+  if [ "$2" = "$3" ]; then st_ok "$1"; else st_bad "$1" "$2" "$3"; fi
+}
+
+st_near() {
+  if fclose "$2" "$3" "$4"; then st_ok "$1"; else st_bad "$1" "$2" "$3"; fi
+}
+
+cmd_selftest() {
+  local fixture totals compute storage hours gbm warn_out epoch_a epoch_b
+  if [ $# -gt 0 ]; then
+    die "selftest 不接受參數"
+  fi
+  printf 'gh-csm %s selftest（離線 fixture，bb9755 2026-10 真實帳單）\n' "$VERSION"
+
+  # SKU 核數解析
+  st_eq "sku_cores 2-core" "2" "$(sku_cores 'Codespaces compute 2-core')"
+  st_eq "sku_cores 4-core" "4" "$(sku_cores 'Codespaces compute 4-core')"
+  st_eq "sku_cores 16-core" "16" "$(sku_cores 'Codespaces compute 16-core')"
+  st_eq "sku_cores 32-core" "32" "$(sku_cores 'Codespaces compute 32-core')"
+  if sku_cores 'Codespaces premium compute 2-core' >/dev/null; then
+    st_bad "sku_cores 未知 SKU 應失敗" "非零退出" "0"
+  else
+    st_ok "sku_cores 未知 SKU 應失敗"
+  fi
+
+  # 真實 fixture 聚合
+  fixture='{"usageItems":[{"date":"2026-10-01T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-02T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-03T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-04T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-05T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-06T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-07T00:00:00Z","product":"codespaces","sku":"Codespaces compute 4-core","quantity":5.08799,"unitType":"Hours","pricePerUnit":0.36,"grossAmount":1.8316764,"discountAmount":1.8316764,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-07T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-08T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-09T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-10T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-11T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-12T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.406576944,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.028460376,"discountAmount":0.028460376,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-12T03:00:00Z","product":"codespaces","sku":"Codespaces compute 4-core","quantity":4.01271,"unitType":"Hours","pricePerUnit":0.36,"grossAmount":1.4445756,"discountAmount":1.4445756,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-13T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.153216771,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.01072517,"discountAmount":0.01072517,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-13T09:00:00Z","product":"codespaces","sku":"Codespaces compute 4-core","quantity":0.01095,"unitType":"Hours","pricePerUnit":0.36,"grossAmount":0.003942,"discountAmount":0.003942,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-29T19:00:00Z","product":"codespaces","sku":"Codespaces compute 2-core","quantity":2.87154,"unitType":"Hours","pricePerUnit":0.18,"grossAmount":0.5168772,"discountAmount":0.5168772,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-29T19:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.036744971,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.002572144,"discountAmount":0.002572144,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-30T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.18404025,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.012882801,"discountAmount":0.012882801,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-30T03:00:00Z","product":"codespaces","sku":"Codespaces compute 2-core","quantity":4.89491,"unitType":"Hours","pricePerUnit":0.18,"grossAmount":0.8810838,"discountAmount":0.8810838,"netAmount":0.0,"repositoryName":"_w"},{"date":"2026-10-31T00:00:00Z","product":"codespaces","sku":"Codespaces storage","quantity":0.144174426,"unitType":"GigabyteHours","pricePerUnit":0.07,"grossAmount":0.010092192,"discountAmount":0.010092192,"netAmount":0.0,"repositoryName":"_w"}]}'
+  totals=$(summarize_usage "$fixture")
+  compute="${totals%% *}"
+  storage="${totals##* }"
+  st_near "fixture compute = 51.98 core-hrs" "51.98" "$(fmt2 "$compute")" "0.01"
+  st_near "fixture storage = 5.40 GB-h" "5.40" "$(fmt2 "$storage")" "0.01"
+
+  # 未知 SKU 必須警告，且不靜默計入
+  warn_out=$(summarize_usage '{"usageItems":[{"product":"codespaces","sku":"Codespaces compute 2-core","quantity":1},{"product":"codespaces","sku":"Codespaces mystery sku","quantity":99}]}' 2>&1 >/dev/null)
+  case "$warn_out" in
+    *"未知 SKU"*) st_ok "未知 SKU 產生警告" ;;
+    *) st_bad "未知 SKU 產生警告" "含「未知 SKU」" "$warn_out" ;;
+  esac
+  totals=$(summarize_usage '{"usageItems":[{"product":"codespaces","sku":"Codespaces compute 2-core","quantity":1},{"product":"codespaces","sku":"Codespaces mystery sku","quantity":99}]}' 2>/dev/null)
+  st_eq "未知 SKU 不計入 compute" "2.00" "$(fmt2 "${totals%% *}")"
+
+  # 月初 UTC 換月時 billing 會回空陣列，不能炸
+  totals=$(summarize_usage '{"usageItems":[]}')
+  st_eq "空 usageItems = 0 / 0" "0.00 0.00" "$(fmt2 "${totals%% *}") $(fmt2 "${totals##* }")"
+
+  # 百分比與色階
+  st_eq "51.98/120 = 43%" "43" "$(pct "$compute" 120)"
+  st_eq "色階 69 = green" "green" "$(color_for 69)"
+  st_eq "色階 70 = yellow" "yellow" "$(color_for 70)"
+  st_eq "色階 89 = yellow" "yellow" "$(color_for 89)"
+  st_eq "色階 90 = red" "red" "$(color_for 90)"
+
+  # 當月 UTC 實際小時數（2026-10 = 744）
+  st_eq "2026-10 有 744 小時" "744" "$(month_hours 2026 10)"
+  st_eq "2026-02 有 672 小時" "672" "$(month_hours 2026 2)"
+  st_eq "2024-02 有 696 小時" "696" "$(month_hours 2024 2)"
+
+  # storage GB-month 換算（÷744，非固定 720）
+  hours=$(month_hours 2026 10)
+  gbm=$(fdiv "$storage" "$hours")
+  st_near "5.397 GB-h ÷ 744 = 0.0073 GB-month" "0.0073" "$(fmt4 "$gbm")" "0.0001"
+
+  # 剩餘時數換算
+  st_near "(120-51.98)/2 ≈ 34.01 h" "34.01" "$(fmt2 "$(fdiv "$(fsub 120 "$compute")" 2)")" "0.01"
+  st_near "(120-51.98)/4 ≈ 17.01 h" "17.01" "$(fmt2 "$(fdiv "$(fsub 120 "$compute")" 4)")" "0.01"
+
+  # 時區轉換：offset 與 Z 必須指同一瞬間
+  epoch_a=$(epoch_from_iso '2026-10-30T23:26:35+08:00')
+  epoch_b=$(epoch_from_iso '2026-10-30T15:26:35Z')
+  st_eq "RFC3339 offset 與 UTC 等值" "$epoch_b" "$epoch_a"
+
+  # 進度條邊界
+  local full empty i
+  full=""
+  empty=""
+  i=0
+  while [ "$i" -lt 20 ]; do
+    full="${full}█"
+    empty="${empty}░"
+    i=$((i + 1))
+  done
+  st_eq "bar 0% 全空" "$empty" "$(bar 0)"
+  st_eq "bar 100% 全滿" "$full" "$(bar 100)"
+
+  printf '\nselftest: %d passed, %d failed\n' "$ST_PASS" "$ST_FAIL"
+  if [ "$ST_FAIL" -gt 0 ]; then
+    exit 1
+  fi
+}
+
+# ---------- main ----------
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    ""|-h|--help|help)
+      usage
+      ;;
+    --version|-v)
+      printf 'gh-csm %s\n' "$VERSION"
+      ;;
+    dash)
+      shift
+      cmd_dash "$@"
+      ;;
+    stop)
+      shift
+      cmd_stop "$@"
+      ;;
+    run)
+      shift
+      cmd_run "$@"
+      ;;
+    selftest)
+      shift
+      cmd_selftest "$@"
+      ;;
+    *)
+      printf 'gh-csm: 未知子命令 %s\n\n' "$cmd" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
