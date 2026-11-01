@@ -1,5 +1,7 @@
 # gh-csm
 
+![CI](https://github.com/BibbyChung/gh-csm/actions/workflows/ci.yml/badge.svg)
+
 GitHub Codespaces quota dashboard and manager, packaged as a gh extension: one command shows
 how much compute / storage quota is left this month, and stops or wakes a codespace while
 you are at it.
