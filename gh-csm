@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 BAR_WIDTH=20
 COMPUTE_LIMIT="${GH_CSM_COMPUTE_LIMIT:-120}"
 STORAGE_LIMIT="${GH_CSM_STORAGE_LIMIT:-15}"
@@ -49,39 +49,40 @@ esac
 
 usage() {
   cat <<'EOF'
-gh-csm — GitHub Codespaces 額度監控與管理器
+gh-csm — GitHub Codespaces quota dashboard & manager
 
-用法:
+Usage:
   gh csm dash [--account <login> | --all]
   gh csm stop [-c <name>] [--account <login>]
-  gh csm run -c <name> [snippet] [--account <login>]
+  gh csm run [-c <name>] [snippet] [--account <login>]
   gh csm selftest
   gh csm help
 
-子命令:
-  dash        額度面板：compute / storage 用量與離重置倒數
-  stop        停止 codespace（無 -c 時為互動選單）
-  run         喚醒 codespace 並執行 snippet；省略 snippet 則進互動 shell
-  selftest    離線 fixture 自檢（不連網）
+Commands:
+  dash        Quota panel: compute / storage usage and reset countdown
+  stop        Stop a codespace (interactive picker without -c)
+  run         Wake a codespace and run a snippet; omit snippet for an interactive shell
+  selftest    Offline fixture self-test (no network)
 
-帳號:
-  預設使用 gh 的 active 帳號。
-  --account <login>   指定已登入的帳號（亦可 --account=<login>）
-  --all               所有已登入帳號，面板垂直堆疊（僅 dash）
+Account:
+  Defaults to the gh active account.
+  --account <login>   Use a signed-in account (also --account=<login>)
+  --all               Every signed-in account, panels stacked (dash only)
 
-額度上限（預設 GitHub Free）:
-  GH_CSM_COMPUTE_LIMIT=120   core-hours / 月
-  GH_CSM_STORAGE_LIMIT=15    GB-month / 月
-  Pro 帳號：GH_CSM_COMPUTE_LIMIT=180 GH_CSM_STORAGE_LIMIT=20 gh csm dash
+Quota limits (GitHub Free defaults):
+  GH_CSM_COMPUTE_LIMIT=120   core-hours / month
+  GH_CSM_STORAGE_LIMIT=15    GB-month / month
+  Pro accounts: GH_CSM_COMPUTE_LIMIT=180 GH_CSM_STORAGE_LIMIT=20 gh csm dash
 
-需求:
-  gh（已 gh auth login，需 user 與 codespace scope）、jq
-  缺 scope 解鎖：gh auth switch --user <login> && gh auth refresh -h github.com -s user,codespace
+Requirements:
+  gh (signed in with gh auth login; needs user and codespace scopes), jq
+  Missing scope unlock: gh auth switch --user <login> && gh auth refresh -h github.com -s user,codespace
 
-例:
+Examples:
   gh csm dash
   gh csm dash --all
   gh csm stop
+  gh csm run
   gh csm run -c my-codespace 'echo gogogo...'
 EOF
 }
@@ -96,7 +97,7 @@ warn() {
 }
 
 need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "找不到 $1，請先安裝"
+  command -v "$1" >/dev/null 2>&1 || die "missing $1, install it first"
 }
 
 # ---------- 數值（bash 3.2 沒有浮點，交給 awk） ----------
@@ -128,8 +129,8 @@ is_positive_number() {
 }
 
 validate_limits() {
-  is_positive_number "$COMPUTE_LIMIT" || die "GH_CSM_COMPUTE_LIMIT 必須是正數（目前：${COMPUTE_LIMIT}）"
-  is_positive_number "$STORAGE_LIMIT" || die "GH_CSM_STORAGE_LIMIT 必須是正數（目前：${STORAGE_LIMIT}）"
+  is_positive_number "$COMPUTE_LIMIT" || die "GH_CSM_COMPUTE_LIMIT must be a positive number (currently: ${COMPUTE_LIMIT})"
+  is_positive_number "$STORAGE_LIMIT" || die "GH_CSM_STORAGE_LIMIT must be a positive number (currently: ${STORAGE_LIMIT})"
 }
 
 # ---------- 領域邏輯 ----------
@@ -297,13 +298,13 @@ load_auth() {
   need_cmd gh
   need_cmd jq
   if [ "$GH_CSM_IGNORED_TOKEN" -eq 1 ]; then
-    warn "已忽略環境變數 GITHUB_TOKEN（會蓋掉 gh 登入身分，codespace 內常見）"
+    warn "ignoring GITHUB_TOKEN env var (it shadows gh login, common inside codespaces)"
   fi
   if ! AUTH_JSON=$(gh auth status --json hosts 2>/dev/null); then
-    die "gh 未登入或 gh 版本過舊（需 2.40+）。先跑：gh auth login"
+    die "gh is not signed in, or gh is too old (2.40+ required). Run: gh auth login"
   fi
   if [ -z "$AUTH_JSON" ]; then
-    die "讀不到 gh 登入狀態，先跑：gh auth login"
+    die "could not read gh auth status. Run: gh auth login"
   fi
 }
 
@@ -346,7 +347,7 @@ require_scope() {
   if has_scope "$scopes" "$2"; then
     return 0
   fi
-  die "帳號 $1 缺 $2 scope。解鎖：gh auth switch --user $1 && gh auth refresh -h github.com -s user,codespace"
+  die "account $1 is missing the $2 scope. Unlock: gh auth switch --user $1 && gh auth refresh -h github.com -s user,codespace"
 }
 
 # GITHUB_TOKEN（codespace 內建）優先序高於 GH_TOKEN，會蓋掉登入身分 → 明確移除。
@@ -355,7 +356,7 @@ gh_as() {
   shift
   local tok
   if ! tok=$(gh auth token --user "$login" 2>/dev/null); then
-    die "取不到 $login 的 token，先跑：gh auth login"
+    die "could not get a token for $login. Run: gh auth login"
   fi
   env -u GITHUB_TOKEN GH_TOKEN="$tok" gh "$@"
 }
@@ -363,18 +364,18 @@ gh_as() {
 resolve_login() {
   local login
   if [ "$ALL" -eq 1 ]; then
-    die "--all 不適用此子命令"
+    die "--all does not apply to this subcommand"
   fi
   if [ -n "$ACCOUNT" ]; then
     if ! list_accounts | grep -qxF -- "$ACCOUNT"; then
-      die "找不到已登入的帳號 ${ACCOUNT}（已登入：$(accounts_inline)）"
+      die "no signed-in account ${ACCOUNT} (signed in: $(accounts_inline))"
     fi
     printf '%s\n' "$ACCOUNT"
     return 0
   fi
   login=$(active_account)
   if [ -z "$login" ]; then
-    die "沒有 active 帳號，請指定 --account <login>"
+    die "no active account, pass --account <login>"
   fi
   printf '%s\n' "$login"
 }
@@ -392,11 +393,11 @@ selected_accounts() {
 fetch_usage() {
   local login="$1" out
   if ! out=$(gh_as "$login" api "/users/$login/settings/billing/usage?year=$BILL_YEAR&month=$BILL_MONTH" 2>&1); then
-    warn "讀取 $login 的 billing 失敗：$(printf '%s' "$out" | head -n 1)（缺 user scope／網路不通／帳號不存在）"
+    warn "failed to read billing for $login: $(printf '%s' "$out" | head -n 1) (missing user scope / network error / unknown account)"
     return 1
   fi
   if ! printf '%s' "$out" | jq -e '.usageItems' >/dev/null 2>&1; then
-    warn "$login 的 billing 回應不是預期 JSON（可能被 proxy 或 HTML 攔截）"
+    warn "$login billing response was not the expected JSON (proxy or HTML interception?)"
     return 1
   fi
   printf '%s\n' "$out"
@@ -427,7 +428,7 @@ summarize_usage() {
     if cores=$(sku_cores "$sku"); then
       compute_tsv="$compute_tsv$cores"$'\t'"$qty"$'\n'
     else
-      warn "未知 SKU「${sku}」已跳過（無法判定核數，不計入額度）"
+      warn "unknown SKU \"${sku}\" skipped (cannot determine cores, not counted toward quota)"
     fi
   done <<< "$rows"
   printf '%s %s\n' "$(printf '%s' "$compute_tsv" | sum_compute)" "$(printf '%s' "$storage_tsv" | sum_quantity)"
@@ -436,7 +437,7 @@ summarize_usage() {
 fetch_codespaces() {
   local login="$1" out
   if ! out=$(gh_as "$login" api "/user/codespaces?per_page=100" 2>&1); then
-    warn "讀取 $login 的 codespace 清單失敗：$(printf '%s' "$out" | head -n 1)"
+    warn "failed to read the codespace list for $login: $(printf '%s' "$out" | head -n 1)"
     return 1
   fi
   printf '%s' "$out" | jq -r '.codespaces[]? | [.name, .state, ((.machine.cpus // 0) | tostring), (.last_used_at // ""), (.repository.full_name // "")] | @tsv'
@@ -450,12 +451,12 @@ print_panel_head() {
   if [ "$show_flag" -eq 1 ] && [ "$active" = "yes" ]; then
     title="$title (active)"
   fi
-  printf '%s── %s · %s UTC · 離重置 %s ────%s\n' \
+  printf '%s── %s · %s UTC · resets in %s ────%s\n' \
     "$C_BOLD" "$title" "$BILL_YM" "$countdown" "$C_RESET"
 }
 
 print_unlock_hint() {
-  printf '  ⚠ 缺 user scope，解鎖：gh auth switch --user %s && gh auth refresh -h github.com -s user,codespace\n' "$1"
+  printf '  ⚠ missing user scope — unlock: gh auth switch --user %s && gh auth refresh -h github.com -s user,codespace\n' "$1"
 }
 
 print_panel() {
@@ -481,11 +482,10 @@ print_panel() {
     rem2=$(remaining_hours "$compute" "$COMPUTE_LIMIT" 2)
     rem4=$(remaining_hours "$compute" "$COMPUTE_LIMIT" 4)
 
-    printf 'Compute  %s%s%s %3s%%   %s/%s core-hrs · 剩 2-core %s%s%sh%s · 4-core %s%s%sh%s\n' \
+    printf 'Compute  %s%s%s %3s%%   %s/%s core-hrs · %s%s2-core %sh · 4-core %sh left%s\n' \
       "$color" "$(bar "$cpct")" "$C_RESET" "$cpct" \
       "$(fmt2 "$compute")" "$COMPUTE_LIMIT" \
-      "$color" "$C_BOLD" "$rem2" "$C_RESET" \
-      "$color" "$C_BOLD" "$rem4" "$C_RESET"
+      "$color" "$C_BOLD" "$rem2" "$rem4" "$C_RESET"
     label="$spct"
     if [ "$spct" -eq 0 ] && fgt "$gbm" 0; then
       label="<1"
@@ -494,7 +494,7 @@ print_panel() {
       "$(color_code "$(color_for "$spct")")" "$(bar "$spct")" "$C_RESET" \
       "$label" "$(fmt2 "$gbm")" "$STORAGE_LIMIT"
   else
-    printf '  ⚠ 無法取得用量（見上方錯誤）\n'
+    printf '  ⚠ could not fetch usage (see error above)\n'
   fi
 }
 
@@ -508,7 +508,7 @@ parse_account_flags() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --account)
-        if [ $# -lt 2 ]; then die "--account 需要 <login>"; fi
+        if [ $# -lt 2 ]; then die "--account requires <login>"; fi
         ACCOUNT="$2"
         shift 2
         ;;
@@ -536,14 +536,14 @@ cmd_dash() {
   local accounts acct first
   parse_account_flags "$@"
   if [ "${#REST[@]}" -gt 0 ]; then
-    die "dash 不認識參數：${REST[0]}（試試 gh csm help）"
+    die "dash: unknown argument ${REST[0]} (try gh csm help)"
   fi
   validate_limits
   load_auth
   set_billing_period
   accounts=$(selected_accounts)
   if [ -z "$accounts" ]; then
-    die "沒有已登入的帳號，先跑：gh auth login"
+    die "no signed-in account. Run: gh auth login"
   fi
   first=1
   # ponytail: 裸變數分詞——GitHub login 字元集 [a-zA-Z0-9-] 保證無空白；支援 GHES、含空白帳號名時須改陣列。
@@ -556,41 +556,12 @@ cmd_dash() {
   done
 }
 
-cmd_stop() {
-  local name login cs i choice sel_name sel_state ans n s c l
-  name=""
-  parse_account_flags "$@"
-  if [ "${#REST[@]}" -gt 0 ]; then
-    case "${REST[0]}" in
-      -c|--codespace)
-        if [ "${#REST[@]}" -lt 2 ]; then die "-c 需要 <name>"; fi
-        name="${REST[1]}"
-        if [ "${#REST[@]}" -gt 2 ]; then die "stop 只接受一個 -c <name>"; fi
-        ;;
-      *) die "stop 不認識參數：${REST[0]}（試試 gh csm help）" ;;
-    esac
-  fi
-  validate_limits
-  load_auth
-  login=$(resolve_login)
-  require_scope "$login" codespace
-
-  if [ -n "$name" ]; then
-    printf '停止 %s（帳號 %s）…\n' "$name" "$login"
-    gh_as "$login" codespace stop -c "$name"
-    return 0
-  fi
-
-  if [ ! -t 0 ]; then
-    die "非互動環境請用：gh csm stop -c <name>"
-  fi
-  if ! cs=$(fetch_codespaces "$login"); then
-    die "讀不到 $login 的 codespace 清單"
-  fi
-  if [ -z "$cs" ]; then
-    die "帳號 $login 目前沒有 codespace"
-  fi
-
+# 共用選單：輸入 fetch_codespaces 的 TSV，選定後設定 PICK_NAME / PICK_STATE。
+# q 取消回 1；非數字或超界直接 die。
+pick_codespace() {
+  local cs="$1" verb="$2" i choice n s c l _
+  PICK_NAME=""
+  PICK_STATE=""
   i=1
   while IFS=$'\t' read -r n s c l _; do
     if [ -z "$n" ]; then
@@ -600,44 +571,82 @@ cmd_stop() {
     i=$((i + 1))
   done <<< "$cs"
 
-  printf '選擇要停止的編號（q 取消）：'
-  read -r choice || die "沒有輸入"
+  printf 'Select which codespace to %s (q to cancel): ' "$verb"
+  read -r choice || die "no input"
   case "$choice" in
-    q|Q) printf '已取消\n' ; return 0 ;;
-    ''|*[!0-9]*) die "請輸入數字編號" ;;
+    q|Q) printf 'Cancelled\n' ; return 1 ;;
+    ''|*[!0-9]*) die "enter a numeric index" ;;
   esac
 
-  sel_name=""
-  sel_state=""
   i=1
   while IFS=$'\t' read -r n s c l _; do
     if [ -z "$n" ]; then
       continue
     fi
     if [ "$i" -eq "$choice" ]; then
-      sel_name="$n"
-      sel_state="$s"
+      PICK_NAME="$n"
+      PICK_STATE="$s"
     fi
     i=$((i + 1))
   done <<< "$cs"
-  if [ -z "$sel_name" ]; then
-    die "編號 $choice 超出範圍"
+  if [ -z "$PICK_NAME" ]; then
+    die "index $choice is out of range"
   fi
-  if [ "$sel_state" = "Shutdown" ]; then
-    die "$sel_name 已經是 Shutdown（想省 storage 請用 gh codespace delete -c ${sel_name}）"
+  return 0
+}
+
+cmd_stop() {
+  local name login cs ans
+  name=""
+  parse_account_flags "$@"
+  if [ "${#REST[@]}" -gt 0 ]; then
+    case "${REST[0]}" in
+      -c|--codespace)
+        if [ "${#REST[@]}" -lt 2 ]; then die "-c requires <name>"; fi
+        name="${REST[1]}"
+        if [ "${#REST[@]}" -gt 2 ]; then die "stop accepts a single -c <name>"; fi
+        ;;
+      *) die "stop: unknown argument ${REST[0]} (try gh csm help)" ;;
+    esac
+  fi
+  validate_limits
+  load_auth
+  login=$(resolve_login)
+  require_scope "$login" codespace
+
+  if [ -n "$name" ]; then
+    printf 'Stopping %s (account %s)…\n' "$name" "$login"
+    gh_as "$login" codespace stop -c "$name"
+    return 0
   fi
 
-  printf '停止 %s？[y/N] ' "$sel_name"
+  if [ ! -t 0 ]; then
+    die "use -c <name> in non-interactive mode: gh csm stop -c <name>"
+  fi
+  if ! cs=$(fetch_codespaces "$login"); then
+    die "could not read the codespace list for $login"
+  fi
+  if [ -z "$cs" ]; then
+    die "account $login has no codespaces"
+  fi
+  if ! pick_codespace "$cs" stop; then
+    return 0
+  fi
+  if [ "$PICK_STATE" = "Shutdown" ]; then
+    die "$PICK_NAME is already Shutdown (to reclaim storage use: gh codespace delete -c $PICK_NAME)"
+  fi
+
+  printf 'Stop %s? [y/N] ' "$PICK_NAME"
   read -r ans || ans=""
   case "$ans" in
     y|Y|yes|YES) ;;
-    *) printf '已取消\n' ; return 0 ;;
+    *) printf 'Cancelled\n' ; return 0 ;;
   esac
-  gh_as "$login" codespace stop -c "$sel_name"
+  gh_as "$login" codespace stop -c "$PICK_NAME"
 }
 
 cmd_run() {
-  local name snippet have_snippet login arg idx
+  local name snippet have_snippet login arg idx cs
   name=""
   snippet=""
   have_snippet=0
@@ -645,7 +654,7 @@ cmd_run() {
   if [ "${#REST[@]}" -gt 0 ]; then
     case "${REST[0]}" in
       -c|--codespace)
-        if [ "${#REST[@]}" -lt 2 ]; then die "-c 需要 <name>"; fi
+        if [ "${#REST[@]}" -lt 2 ]; then die "-c requires <name>"; fi
         name="${REST[1]}"
         idx=2
         while [ "$idx" -lt "${#REST[@]}" ]; do
@@ -659,22 +668,40 @@ cmd_run() {
           idx=$((idx + 1))
         done
         ;;
-      *) die "run 不認識參數：${REST[0]}（試試 gh csm help）" ;;
+      *) die "run: unknown argument ${REST[0]} (try gh csm help)" ;;
     esac
-  fi
-  if [ -z "$name" ]; then
-    die "run 需要 -c <name>"
   fi
   validate_limits
   load_auth
   login=$(resolve_login)
   require_scope "$login" codespace
 
+  if [ -z "$name" ]; then
+    if [ ! -t 0 ]; then
+      die "run requires -c <name> in non-interactive mode"
+    fi
+    if ! cs=$(fetch_codespaces "$login"); then
+      die "could not read the codespace list for $login"
+    fi
+    if [ -z "$cs" ]; then
+      die "account $login has no codespaces"
+    fi
+    if ! pick_codespace "$cs" run; then
+      return 0
+    fi
+    name="$PICK_NAME"
+    printf 'Command to run (Enter for interactive shell): '
+    read -r snippet || snippet=""
+    if [ -n "$snippet" ]; then
+      have_snippet=1
+    fi
+  fi
+
   if [ "$have_snippet" -eq 1 ]; then
-    printf '喚醒 %s 並執行：%s\n' "$name" "$snippet"
+    printf 'Waking %s and running: %s\n' "$name" "$snippet"
     gh_as "$login" codespace ssh -c "$name" -- "$snippet"
   else
-    printf '喚醒 %s 並進入 shell…\n' "$name"
+    printf 'Waking %s and entering shell…\n' "$name"
     gh_as "$login" codespace ssh -c "$name"
   fi
 }
@@ -691,7 +718,7 @@ st_ok() {
 
 st_bad() {
   ST_FAIL=$((ST_FAIL + 1))
-  printf '  FAIL %s（期望 %s，實際 %s）\n' "$1" "$2" "$3"
+  printf '  FAIL %s (expected %s, got %s)\n' "$1" "$2" "$3"
 }
 
 st_eq() {
@@ -705,9 +732,9 @@ st_near() {
 cmd_selftest() {
   local fixture totals compute storage hours gbm warn_out epoch_a epoch_b
   if [ $# -gt 0 ]; then
-    die "selftest 不接受參數"
+    die "selftest takes no arguments"
   fi
-  printf 'gh-csm %s selftest（離線 fixture，bb9755 2026-10 真實帳單）\n' "$VERSION"
+  printf 'gh-csm %s selftest (offline fixtures, bb9755 2026-10 real billing)\n' "$VERSION"
 
   # SKU 核數解析
   st_eq "sku_cores 2-core" "2" "$(sku_cores 'Codespaces compute 2-core')"
@@ -715,9 +742,9 @@ cmd_selftest() {
   st_eq "sku_cores 16-core" "16" "$(sku_cores 'Codespaces compute 16-core')"
   st_eq "sku_cores 32-core" "32" "$(sku_cores 'Codespaces compute 32-core')"
   if sku_cores 'Codespaces premium compute 2-core' >/dev/null; then
-    st_bad "sku_cores 未知 SKU 應失敗" "非零退出" "0"
+    st_bad "sku_cores unknown SKU fails" "non-zero exit" "0"
   else
-    st_ok "sku_cores 未知 SKU 應失敗"
+    st_ok "sku_cores unknown SKU fails"
   fi
 
   # 真實 fixture 聚合
@@ -731,49 +758,49 @@ cmd_selftest() {
   # 未知 SKU 必須警告，且不靜默計入
   warn_out=$(summarize_usage '{"usageItems":[{"product":"codespaces","sku":"Codespaces compute 2-core","quantity":1},{"product":"codespaces","sku":"Codespaces mystery sku","quantity":99}]}' 2>&1 >/dev/null)
   case "$warn_out" in
-    *"未知 SKU"*) st_ok "未知 SKU 產生警告" ;;
-    *) st_bad "未知 SKU 產生警告" "含「未知 SKU」" "$warn_out" ;;
+    *"unknown SKU"*) st_ok "unknown SKU warns" ;;
+    *) st_bad "unknown SKU warns" 'contains "unknown SKU"' "$warn_out" ;;
   esac
   totals=$(summarize_usage '{"usageItems":[{"product":"codespaces","sku":"Codespaces compute 2-core","quantity":1},{"product":"codespaces","sku":"Codespaces mystery sku","quantity":99}]}' 2>/dev/null)
-  st_eq "未知 SKU 不計入 compute" "2.00" "$(fmt2 "${totals%% *}")"
+  st_eq "unknown SKU not counted in compute" "2.00" "$(fmt2 "${totals%% *}")"
 
   # 月初 UTC 換月時 billing 會回空陣列，不能炸
   totals=$(summarize_usage '{"usageItems":[]}')
-  st_eq "空 usageItems = 0 / 0" "0.00 0.00" "$(fmt2 "${totals%% *}") $(fmt2 "${totals##* }")"
+  st_eq "empty usageItems = 0 / 0" "0.00 0.00" "$(fmt2 "${totals%% *}") $(fmt2 "${totals##* }")"
 
   # 百分比與色階
   st_eq "51.98/120 = 43%" "43" "$(pct "$compute" 120)"
-  st_eq "色階 69 = green" "green" "$(color_for 69)"
-  st_eq "色階 70 = yellow" "yellow" "$(color_for 70)"
-  st_eq "色階 89 = yellow" "yellow" "$(color_for 89)"
-  st_eq "色階 90 = red" "red" "$(color_for 90)"
+  st_eq "threshold 69 = green" "green" "$(color_for 69)"
+  st_eq "threshold 70 = yellow" "yellow" "$(color_for 70)"
+  st_eq "threshold 89 = yellow" "yellow" "$(color_for 89)"
+  st_eq "threshold 90 = red" "red" "$(color_for 90)"
 
   # 當月 UTC 實際小時數（2026-10 = 744）
-  st_eq "2026-10 有 744 小時" "744" "$(month_hours 2026 10)"
-  st_eq "2026-02 有 672 小時" "672" "$(month_hours 2026 2)"
-  st_eq "2024-02 有 696 小時" "696" "$(month_hours 2024 2)"
+  st_eq "2026-10 has 744 hours" "744" "$(month_hours 2026 10)"
+  st_eq "2026-02 has 672 hours" "672" "$(month_hours 2026 2)"
+  st_eq "2024-02 has 696 hours" "696" "$(month_hours 2024 2)"
 
   # storage GB-month 換算（÷744，非固定 720）
   hours=$(month_hours 2026 10)
   gbm=$(fdiv "$storage" "$hours")
-  st_near "5.397 GB-h ÷ 744 = 0.0073 GB-month" "0.0073" "$(fmt4 "$gbm")" "0.0001"
+  st_near "5.397 GB-h / 744 = 0.0073 GB-month" "0.0073" "$(fmt4 "$gbm")" "0.0001"
 
   # 剩餘時數換算（整數、向下取整）
   st_eq "(120-51.98)/2 = 34h" "34" "$(remaining_hours "$compute" 120 2)"
   st_eq "(120-51.98)/4 = 17h" "17" "$(remaining_hours "$compute" 120 4)"
-  st_eq "額度用完 = 0h" "0" "$(remaining_hours 130 120 2)"
+  st_eq "exhausted quota = 0h" "0" "$(remaining_hours 130 120 2)"
 
   # 離重置倒數（固定 now epoch，對特定計費月）
-  st_eq "倒數 2026-10 剩 7d22h" "7d22h" "$(reset_countdown 1792807200 2026 10)"
-  st_eq "倒數 12 月跨年（2027-01-01 前 5h）" "5h" \
+  st_eq "countdown for 2026-10 = 7d22h" "7d22h" "$(reset_countdown 1792807200 2026 10)"
+  st_eq "countdown across new year (5h before 2027-01-01)" "5h" \
     "$(reset_countdown "$(epoch_from_iso '2026-12-31T19:00:00Z')" 2026 12)"
-  st_eq "倒數不足 1 小時 = 42m" "42m" \
+  st_eq "countdown under 1 hour = 42m" "42m" \
     "$(reset_countdown "$(epoch_from_iso '2026-10-31T23:18:00Z')" 2026 10)"
 
   # 時區轉換：offset 與 Z 必須指同一瞬間
   epoch_a=$(epoch_from_iso '2026-10-30T23:26:35+08:00')
   epoch_b=$(epoch_from_iso '2026-10-30T15:26:35Z')
-  st_eq "RFC3339 offset 與 UTC 等值" "$epoch_b" "$epoch_a"
+  st_eq "RFC3339 offset equals UTC instant" "$epoch_b" "$epoch_a"
 
   # 進度條邊界
   local full empty i
@@ -785,8 +812,8 @@ cmd_selftest() {
     empty="${empty}░"
     i=$((i + 1))
   done
-  st_eq "bar 0% 全空" "$empty" "$(bar 0)"
-  st_eq "bar 100% 全滿" "$full" "$(bar 100)"
+  st_eq "bar 0% all empty" "$empty" "$(bar 0)"
+  st_eq "bar 100% all full" "$full" "$(bar 100)"
 
   printf '\nselftest: %d passed, %d failed\n' "$ST_PASS" "$ST_FAIL"
   if [ "$ST_FAIL" -gt 0 ]; then
@@ -822,7 +849,7 @@ main() {
       cmd_selftest "$@"
       ;;
     *)
-      printf 'gh-csm: 未知子命令 %s\n\n' "$cmd" >&2
+      printf 'gh-csm: unknown subcommand %s\n\n' "$cmd" >&2
       usage >&2
       exit 1
       ;;
