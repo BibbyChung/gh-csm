@@ -12,7 +12,7 @@ export LC_ALL=C
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 BAR_WIDTH=20
 COMPUTE_LIMIT="${GH_CSM_COMPUTE_LIMIT:-120}"
 STORAGE_LIMIT="${GH_CSM_STORAGE_LIMIT:-15}"
@@ -21,6 +21,8 @@ AUTH_JSON=""
 BILL_YM=""
 BILL_YEAR=""
 BILL_MONTH=""
+MONTH=""
+MONTH_SET=0
 
 # codespace 內建的 GITHUB_TOKEN 優先序高於 gh 的登入憑證，會讓所有查詢變成
 # 別的 token 身分（常見症狀：403 或「沒有 active 帳號」）。本工具一律以 gh
@@ -55,7 +57,7 @@ usage() {
 gh-csm — GitHub Codespaces quota dashboard & manager
 
 Usage:
-  gh csm quota [--account <login> | --all]
+  gh csm quota [--account <login> | --all] [--month <YYYY-MM>]
   gh csm stop [-c <name>] [--account <login>]
   gh csm start [-c <name>] [snippet] [--account <login>]
   gh csm selftest
@@ -72,6 +74,9 @@ Account:
   --account <login>   Use a signed-in account (also --account=<login>)
   --all               Every signed-in account, panels stacked (quota only)
 
+Month:
+  --month <YYYY-MM>   Render a past UTC billing month (quota only; also --month=<YYYY-MM>)
+
 Quota limits (GitHub Free defaults):
   GH_CSM_COMPUTE_LIMIT=120   core-hours / month
   GH_CSM_STORAGE_LIMIT=15    GB-month / month
@@ -79,11 +84,13 @@ Quota limits (GitHub Free defaults):
 
 Requirements:
   gh (signed in with gh auth login; needs user and codespace scopes), jq
-  Missing scope unlock: gh auth switch --user <login> && gh auth refresh -h github.com -s user,codespace
+  Missing scope unlock: gh auth refresh -h github.com -s user,codespace
+  (inactive account: gh auth switch --user <login> first, switch back afterwards)
 
 Examples:
   gh csm quota
   gh csm quota --all
+  gh csm quota --month 2026-10
   gh csm stop
   gh csm start
   gh csm start -c my-codespace 'echo gogogo...'
@@ -286,10 +293,42 @@ reset_countdown() {
 }
 
 set_billing_period() {
-  BILL_YM=$(date -u '+%Y-%m')
+  BILL_YM="${1:-$(date -u '+%Y-%m')}"
   BILL_YEAR="${BILL_YM%-*}"
   BILL_MONTH="${BILL_YM#*-}"
   BILL_MONTH="${BILL_MONTH#0}"
+}
+
+# 回 0 = 可用月份；回 1 並印英文原因（--month 錯誤訊息）。
+# 規則：YYYY-MM、月 01–12、不得晚於當前 UTC 月；過去月份不設下限。
+month_error() {
+  local m="$1" mo cur
+  case "$m" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]) ;;
+    *)
+      printf 'invalid --month %s (expected YYYY-MM)\n' "$m"
+      return 1
+      ;;
+  esac
+  mo="${m#*-}"
+  mo="${mo#0}"
+  if [ "$mo" -lt 1 ] || [ "$mo" -gt 12 ]; then
+    printf 'invalid --month %s (month must be 01-12)\n' "$m"
+    return 1
+  fi
+  cur=$(date -u '+%Y-%m')
+  if [ "$m" \> "$cur" ]; then
+    printf '%s\n' "--month $m is in the future (latest available: $cur)"
+    return 1
+  fi
+  return 0
+}
+
+validate_month() {
+  local err
+  if ! err=$(month_error "$1"); then
+    die "$err"
+  fi
 }
 
 # ---------- gh 存取（token 只經環境變數傳遞） ----------
@@ -424,7 +463,7 @@ summarize_usage() {
     if [ -z "$sku" ]; then
       continue
     fi
-    if [ "$sku" = "Codespaces storage" ]; then
+    if [ "$sku" = "Codespaces storage" ] || [ "$sku" = "Codespaces prebuild storage" ]; then
       storage_tsv="$storage_tsv$qty"$'\n'
       continue
     fi
@@ -449,28 +488,45 @@ fetch_codespaces() {
 # ---------- 面板 ----------
 
 print_panel_head() {
-  local login="$1" active="$2" show_flag="$3" countdown="$4" title
+  local login="$1" active="$2" show_flag="$3" title
   title="$login"
   if [ "$show_flag" -eq 1 ] && [ "$active" = "yes" ]; then
     title="$title (active)"
   fi
-  printf '%s── %s · %s UTC · resets in %s ────%s\n' \
-    "$C_BOLD" "$title" "$BILL_YM" "$countdown" "$C_RESET"
+  if [ "$BILL_YM" = "$(date -u '+%Y-%m')" ]; then
+    printf '%s── %s · %s UTC · resets in %s ────%s\n' \
+      "$C_BOLD" "$title" "$BILL_YM" \
+      "$(reset_countdown "$(date -u +%s)" "$BILL_YEAR" "$BILL_MONTH")" "$C_RESET"
+  else
+    printf '%s── %s · %s UTC ────%s\n' "$C_BOLD" "$title" "$BILL_YM" "$C_RESET"
+  fi
 }
 
+# 缺 scope 的解鎖步驟：目標已是 active 只需 refresh；否則 switch 過去、refresh、
+# 再切回目前 active（gh auth refresh 沒有 --user，見 SPEC §5.7）。
 print_unlock_hint() {
-  printf '  ⚠ missing user scope — unlock: gh auth switch --user %s && gh auth refresh -h github.com -s user,codespace\n' "$1"
+  local login="$1" active="$2" cur
+  if [ "$active" = "yes" ]; then
+    printf '  ⚠ missing user scope — unlock: gh auth refresh -h github.com -s user,codespace\n'
+    return 0
+  fi
+  cur=$(active_account)
+  if [ -z "$cur" ]; then
+    printf '  ⚠ missing user scope — unlock: gh auth switch --user %s && gh auth refresh -h github.com -s user,codespace\n' "$login"
+    return 0
+  fi
+  printf '  ⚠ missing user scope — unlock: gh auth switch --user %s && gh auth refresh -h github.com -s user,codespace && gh auth switch --user %s\n' "$login" "$cur"
 }
 
 print_panel() {
   local login="$1" active="$2" show_flag="$3"
   local scopes usage totals compute storage hours gbm cpct spct label color rem2 rem4
   scopes=$(account_scopes "$login")
-  print_panel_head "$login" "$active" "$show_flag" "$(reset_countdown "$(date -u +%s)" "$BILL_YEAR" "$BILL_MONTH")"
+  print_panel_head "$login" "$active" "$show_flag"
 
   if ! has_scope "$scopes" user; then
-    print_unlock_hint "$login"
-    return 0
+    print_unlock_hint "$login" "$active"
+    return 1
   fi
 
   if usage=$(fetch_usage "$login"); then
@@ -498,15 +554,18 @@ print_panel() {
       "$label" "$(fmt2 "$gbm")" "$STORAGE_LIMIT"
   else
     printf '  ⚠ could not fetch usage (see error above)\n'
+    return 1
   fi
 }
 
 # ---------- 子命令 ----------
 
 parse_account_flags() {
-  # 設定 ACCOUNT / ALL，其餘參數留在 REST 陣列
+  # 設定 ACCOUNT / ALL / MONTH，其餘參數留在 REST 陣列
   ACCOUNT=""
   ALL=0
+  MONTH=""
+  MONTH_SET=0
   REST=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -523,6 +582,17 @@ parse_account_flags() {
         ALL=1
         shift
         ;;
+      --month)
+        if [ $# -lt 2 ]; then die "--month requires YYYY-MM"; fi
+        MONTH="$2"
+        MONTH_SET=1
+        shift 2
+        ;;
+      --month=*)
+        MONTH="${1#*=}"
+        MONTH_SET=1
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
@@ -536,27 +606,34 @@ parse_account_flags() {
 }
 
 cmd_quota() {
-  local accounts acct first
+  local accounts acct first rc
   parse_account_flags "$@"
   if [ "${#REST[@]}" -gt 0 ]; then
     die "quota: unknown argument ${REST[0]} (try gh csm help)"
   fi
   validate_limits
+  if [ "$MONTH_SET" -eq 1 ]; then
+    validate_month "$MONTH"
+    set_billing_period "$MONTH"
+  else
+    set_billing_period
+  fi
   load_auth
-  set_billing_period
   accounts=$(selected_accounts)
   if [ -z "$accounts" ]; then
     die "no signed-in account. Run: gh auth login"
   fi
   first=1
+  rc=0
   # ponytail: 裸變數分詞——GitHub login 字元集 [a-zA-Z0-9-] 保證無空白；支援 GHES、含空白帳號名時須改陣列。
   for acct in $accounts; do
     if [ "$first" -eq 0 ]; then
       printf '\n'
     fi
     first=0
-    print_panel "$acct" "$(account_is_active "$acct")" "$ALL"
+    print_panel "$acct" "$(account_is_active "$acct")" "$ALL" || rc=1
   done
+  return "$rc"
 }
 
 # 共用選單：輸入 fetch_codespaces 的 TSV，選定後設定 PICK_NAME / PICK_STATE。
@@ -602,6 +679,9 @@ cmd_stop() {
   local name login cs ans
   name=""
   parse_account_flags "$@"
+  if [ "$MONTH_SET" -eq 1 ]; then
+    die "--month only applies to quota"
+  fi
   if [ "${#REST[@]}" -gt 0 ]; then
     case "${REST[0]}" in
       -c|--codespace)
@@ -654,6 +734,9 @@ cmd_start() {
   snippet=""
   have_snippet=0
   parse_account_flags "$@"
+  if [ "$MONTH_SET" -eq 1 ]; then
+    die "--month only applies to quota"
+  fi
   if [ "${#REST[@]}" -gt 0 ]; then
     case "${REST[0]}" in
       -c|--codespace)
@@ -733,7 +816,7 @@ st_near() {
 }
 
 cmd_selftest() {
-  local fixture totals compute storage hours gbm warn_out epoch_a epoch_b
+  local fixture totals compute storage hours gbm warn_out epoch_a epoch_b msg ym
   if [ $# -gt 0 ]; then
     die "selftest takes no arguments"
   fi
@@ -767,6 +850,12 @@ cmd_selftest() {
   totals=$(summarize_usage '{"usageItems":[{"product":"codespaces","sku":"Codespaces compute 2-core","quantity":1},{"product":"codespaces","sku":"Codespaces mystery sku","quantity":99}]}' 2>/dev/null)
   st_eq "unknown SKU not counted in compute" "2.00" "$(fmt2 "${totals%% *}")"
 
+  # prebuild storage 與一般 storage 共用同一個 GigabyteHours 池
+  totals=$(summarize_usage '{"usageItems":[{"product":"codespaces","sku":"Codespaces storage","quantity":2},{"product":"codespaces","sku":"Codespaces prebuild storage","quantity":3}]}' 2>/dev/null)
+  st_eq "prebuild storage counted in storage total" "5.00" "$(fmt2 "${totals##* }")"
+  warn_out=$(summarize_usage '{"usageItems":[{"product":"codespaces","sku":"Codespaces prebuild storage","quantity":1}]}' 2>&1 >/dev/null)
+  st_eq "prebuild storage does not warn" "" "$warn_out"
+
   # 月初 UTC 換月時 billing 會回空陣列，不能炸
   totals=$(summarize_usage '{"usageItems":[]}')
   st_eq "empty usageItems = 0 / 0" "0.00 0.00" "$(fmt2 "${totals%% *}") $(fmt2 "${totals##* }")"
@@ -782,6 +871,38 @@ cmd_selftest() {
   st_eq "2026-10 has 744 hours" "744" "$(month_hours 2026 10)"
   st_eq "2026-02 has 672 hours" "672" "$(month_hours 2026 2)"
   st_eq "2024-02 has 696 hours" "696" "$(month_hours 2024 2)"
+
+  # --month 驗證：合法 / 格式錯 / 00 / 13 / 未來 / 當前月
+  if month_error 2024-02 >/dev/null; then
+    st_ok "month 2024-02 accepted"
+  else
+    st_bad "month 2024-02 accepted" "accepted" "rejected"
+  fi
+  for ym in 2026-1 2026-00 2026-13 2999-01; do
+    if month_error "$ym" >/dev/null; then
+      st_bad "month $ym rejected" "rejected" "accepted"
+    else
+      st_ok "month $ym rejected"
+    fi
+  done
+  ym=$(date -u '+%Y-%m')
+  if month_error "$ym" >/dev/null; then
+    st_ok "current UTC month $ym accepted"
+  else
+    st_bad "current UTC month $ym accepted" "accepted" "rejected"
+  fi
+  if msg=$(month_error 2999-01); then
+    st_bad "future month error names latest available" "rejected with message" "accepted"
+  else
+    case "$msg" in
+      *"latest available: "*) st_ok "future month error names latest available" ;;
+      *) st_bad "future month error names latest available" 'contains "latest available: "' "$msg" ;;
+    esac
+  fi
+
+  # set_billing_period 吃覆寫（不呼叫 date 也能測）
+  set_billing_period 2024-02
+  st_eq "set_billing_period override" "2024-02 2024 2" "$BILL_YM $BILL_YEAR $BILL_MONTH"
 
   # storage GB-month 換算（÷744，非固定 720）
   hours=$(month_hours 2026 10)

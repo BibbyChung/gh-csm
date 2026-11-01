@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: shellcheck + selftest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install shellcheck (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+      - name: Install shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+      - name: shellcheck
+        run: shellcheck gh-csm
+      - name: selftest (bash 3.2, macOS system bash)
+        if: runner.os == 'macOS'
+        run: /bin/bash gh-csm selftest
+      - name: selftest (bash 5.x)
+        if: runner.os == 'Linux'
+        run: bash gh-csm selftest

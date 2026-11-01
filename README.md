@@ -21,7 +21,7 @@ Compute  ████████░░░░░░░░░░░░  43%   51.
 Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
 
 ── BibbyChung · 2026-10 UTC · resets in 7d22h ────
-  ⚠ missing user scope — unlock: gh auth switch --user BibbyChung && gh auth refresh -h github.com -s user,codespace
+  ⚠ missing user scope — unlock: gh auth switch --user BibbyChung && gh auth refresh -h github.com -s user,codespace && gh auth switch --user bb9755
 ```
 
 ## Features
@@ -29,6 +29,7 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 - **quota**: three lines and done — compute / storage bars (green <70%, yellow 70–89%,
   red ≥90%), the remaining core-hours converted to 2-core / 4-core hours (integers, rounded
   down, never overreported), and a reset countdown in the header (`7d22h` / `5h` / `42m`).
+  `--month YYYY-MM` renders a past UTC billing month instead of the current one.
   Lists and actions live in `stop`; quota makes a single billing API call.
 - **stop**: without arguments it is an interactive picker (pick a number, then confirm);
   `-c <name>` stops directly.
@@ -92,6 +93,9 @@ gh auth refresh -h github.com -s user,codespace
 gh auth switch --user your-main-account
 ```
 
+`gh csm` prints this sequence in the panel, substituting the account it is showing and your
+current active account; an account that is already active only needs the `gh auth refresh` line.
+
 An account without the scopes does not break the whole dashboard — its panel keeps a single
 unlock line while the other accounts render normally.
 
@@ -102,6 +106,7 @@ gh csm                        # help
 gh csm quota                  # quota panel (quota must be spelled out; there is no default subcommand)
 gh csm quota --all            # every signed-in account, panels stacked
 gh csm quota --account bb9755 # one account
+gh csm quota --month 2026-10  # a past UTC billing month (no reset countdown)
 
 gh csm stop                  # picker, then confirm
 gh csm stop -c my-codespace  # stop directly
@@ -112,6 +117,24 @@ gh csm start -c my-codespace                    # wake + interactive shell
 
 gh csm selftest              # offline self-test
 ```
+
+### Past months
+
+`--month YYYY-MM` renders an earlier UTC billing month. The header drops `resets in …` (a
+countdown only means something for the current month); storage is still divided by that
+month's actual hours. The current UTC month is allowed; future months are rejected with the
+latest available month in the error.
+
+### Exit codes
+
+`quota` exits 0 when every requested account rendered, and 1 when any requested account could
+not be read — missing `user` scope, or the billing fetch failed. `--all` still prints every
+panel and exits 1 if at least one account failed.
+
+| code | meaning |
+|---|---|
+| 0 | every requested account rendered |
+| 1 | bad arguments / auth error, or at least one requested account unreadable |
 
 ### Quota limits
 
@@ -140,6 +163,10 @@ The API does not expose the account's plan, so this is the only way.
   picker's last used is converted to local time.
 - **Shutdown still bills storage**: stopping only stops compute; storage keeps accruing. Delete
   to actually stop the bleeding.
+- **Storage SKU**: `Codespaces storage` and `Codespaces prebuild storage` count toward the same
+  GigabyteHours pool. The prebuild label is inferred from the API's `codespaces_prebuild_storage`
+  id and has not been verified against a real prebuild account; if GitHub returns a different
+  label it is skipped with a warning, never miscounted.
 - **Deleting does not remove usage already recorded**: billing history stays.
 - **classic OAuth only**: the billing endpoint rejects fine-grained PATs; unlock with
   `gh auth refresh` only.
@@ -155,6 +182,9 @@ The API does not expose the account's plan, so this is the only way.
 shellcheck gh-csm
 /bin/bash gh-csm selftest
 ```
+
+CI (`.github/workflows/ci.yml`) runs the same two checks on Ubuntu (bash 5.x) and macOS
+(bash 3.2, the system `/bin/bash`).
 
 Design decisions, API contract, formulas and the minefield list live in [SPEC.md](SPEC.md).
 

@@ -17,7 +17,8 @@ GitHub Codespaces 額度監控與管理器的實作契約。使用者文件見 [
 | 資料源 | 官方 REST billing API | 網頁內部 `usage_table` 端點未公開、無版本承諾、需 session cookie，已排除 |
 | 認證 | gh 既有的 OAuth token（`user` + `codespace` scope） | 腳本不儲存、不輸出 token；只以環境變數傳遞 |
 
-三個交付檔：`gh-csm`（程式）、`README.md`（使用者）、`SPEC.md`（本文件）。
+三個交付檔：`gh-csm`（程式）、`README.md`（使用者）、`SPEC.md`（本文件）；另有 CI workflow
+（`.github/workflows/ci.yml`）。
 
 ---
 
@@ -80,6 +81,11 @@ GET https://api.github.com/users/{username}/settings/billing/usage?year=YYYY&mon
 → compute 51.98 core-hrs（43% of 120）、storage 5.397 GB-h ÷ 744 h ≈ 0.0073 GB-month。
 這組數字就是 `selftest` 的內嵌 fixture。
 
+> prebuild 儲存：官方 SKU id 為 `codespaces_prebuild_storage`；本工具同時接受字串
+> `Codespaces prebuild storage`，與 `Codespaces storage` 併入同一 GigabyteHours 池。
+> 此字串由 id 推導、未經真實 prebuild 帳號驗證；若實際字串不同會落入未知 SKU 的
+> warn（跳過而非算錯，見 §5.12）。
+
 ### 2.2 欄位語義
 
 | 欄位 | 語義 | 本工具怎麼用 |
@@ -123,6 +129,7 @@ storage_pct        = floor(storage_gb_month  / storage_limit  × 100)
 - 剩餘時數一律向下取整（34.01 → `34`），不虛報。
 - 重置倒數格式：≥1 天 `7d22h`、<1 天 `5h`、<1 小時 `42m`。
 - 未知 SKU：印出警告並跳過（無法判定核數時不猜），**不得靜默丟棄**。
+- storage 加總同時接受 `Codespaces storage` 與 `Codespaces prebuild storage`（同一 GigabyteHours 池）。
 - 2026-10 的 UTC 時數為 31 × 24 = 744，不是 720；`selftest` 以此為驗算基準。
 
 ---
@@ -133,7 +140,7 @@ storage_pct        = floor(storage_gb_month  / storage_limit  × 100)
 
 ```
 gh csm                                  # help（不做 quota fallback）
-gh csm quota [--account <login> | --account=<login> | --all]
+gh csm quota [--account <login> | --account=<login> | --all] [--month <YYYY-MM> | --month=<YYYY-MM>]
 gh csm stop [-c <name>] [--account <login> | --account=<login>]
 gh csm start [-c <name>] [snippet] [--account <login> | --account=<login>]
 gh csm selftest
@@ -142,6 +149,9 @@ gh csm help | --help | --version
 
 - 帳號預設 = gh 的 active 帳號；`--account` 指定；`--all` 逐一堆疊面板（僅 quota）。
 - `--account` 空白與等號兩種形式皆可；`--all`、`-c` 只有空白形式（`--all=1`、`-c=x` 視為未知參數）。
+- `--month` 僅 quota 適用（stop / start 收到直接報錯）：渲染指定 UTC 計費月，格式 `YYYY-MM`、
+  月 01–12；晚於當前 UTC 月直接報錯並附目前可用上限，當前月允許，過去月份不設下限。
+  空白與等號兩種形式皆可。
 - `-c` 與 `--codespace` 同義（`stop` / `start`）。
 - `stop` / `start` 不支援 `--all`（一次一個帳號）。
 - `stop` / `start` 不帶 `-c` 且 stdin 是 TTY：開共用互動選單 `pick_codespace`（§4.3.1）；
@@ -170,19 +180,24 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 
 規則：
 
-1. header 固定 `── <login>[ (active)] · <YYYY-MM> UTC · resets in <countdown> ────`。
+1. header 固定 `── <login>[ (active)] · <YYYY-MM> UTC[ · resets in <countdown>] ────`；
+   `resets in …` 只在查詢當前 UTC 月時出現，歷史月份省略（倒數只對當前計費月有意義）。
 2. 進度條寬度 20 格，`█` 已用 / `░` 未用；綠 `<70`、黃 `70–89`、紅 `≥90`。
 3. Compute 行：`<used>/<limit> core-hrs`（2 位小數）＋`2-core <N>h · 4-core <M>h left`；
    時數整數向下取整，`2-core … left` 整段以粗體＋進度條同色標示（非 TTY / `NO_COLOR` 時退化為純文字）。
 4. Storage 行恆顯示（無顯示門檻）；`storage_pct == 0` 且用量 > 0 → `<1%`；數值 2 位小數；
-   不再顯示 GB-h ÷ 小時的換算細節。
+   不再顯示 GB-h ÷ 小時的換算細節。storage 除以查詢月份（`--month`）的實際時數。
 5. quota 不含 codespace 清單與行動建議（理由見 §9.1），**只呼叫 billing API**；
    `fetch_codespaces` 僅供 `stop` / `start` 的選單使用。
 6. 顏色只在 stdout 是 TTY 且 `NO_COLOR` 未設時輸出。
-7. 缺 `user` scope 的帳號：只顯示單行解鎖提示（`⚠ missing user scope — unlock: …`），
-   不呼叫 billing API、不影響其他帳號。
-8. billing 失敗：stderr 單行錯誤＋面板單行提示，不中斷其他帳號。
+7. 缺 `user` scope 的帳號：只顯示單行解鎖提示，不呼叫 billing API、不影響其他帳號。
+   目標帳號是 active → `unlock: gh auth refresh -h github.com -s user,codespace`；
+   非 active → 三步 `gh auth switch --user <target> && gh auth refresh -h github.com -s user,codespace
+   && gh auth switch --user <目前 active>`（切回原 active，與 README 一致）。
+8. billing 失敗：stderr 單行錯誤＋面板單行提示，不中斷其他帳號；該帳號計為失敗。
 9. 無頁尾結算延遲註記；期待管理（約每小時結算一次）由 README 承接。
+10. exit code：所有要求的帳號都成功渲染 = 0；任一帳號讀不到（缺 `user` scope / billing 失敗）= 1；
+    `--all` 照印全部面板後仍回 1。參數 / 認證錯誤維持 `die` = 1。
 
 ### 4.3 stop
 
@@ -239,9 +254,12 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 10. 進度條 0% / 100% 邊界。
 11. 重置倒數：固定 now epoch + 2026-10 → `7d22h`。
 12. 重置倒數跨年：2026-12 → 2027-01-01 前 5h → `5h`；不足 1 小時 → `42m`。
+13. prebuild storage 與一般 storage 同池計入，且不觸發未知 SKU 警告。
+14. `--month` 驗證：合法（2024-02、當前 UTC 月）、格式錯、`00`、`13`、未來月
+    （錯誤訊息含 `latest available`）；`set_billing_period` 覆寫可離線測試。
 
 任一失敗 → 印「期望 vs 實際」並 exit 1；全過 → exit 0。
-輸出（標題、案例名稱、`selftest: 28 passed, 0 failed`）為英文，共 28 項，與其他使用者可見輸出一致。
+輸出（標題、案例名稱、`selftest: 38 passed, 0 failed`）為英文，共 38 項，與其他使用者可見輸出一致。
 
 ---
 
@@ -315,15 +333,22 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 - 小數點：程式開頭 `export LC_ALL=C`。gawk 在逗號小數 locale（如 `de_DE`）會讓
   `printf "%.2f"` 印出 `51,98`；C locale 固定小數點，輸出全 ASCII 無副作用。
 
+### 5.12 prebuild storage 字串未經實機驗證
+
+官方 SKU id 是 `codespaces_prebuild_storage`，本工具接受對應的人類可讀字串
+`Codespaces prebuild storage`。若 GitHub 實際回傳不同標籤，會落入未知 SKU 的 warn 並跳過——
+少算但不誤算（安全方向失敗）。有真實 prebuild 用量時應以 API 回應校正此字串。
+
 ---
 
 ## 6. 測試策略
 
 | 層級 | 方式 |
 |---|---|
-| 離線 | `gh-csm selftest`：內嵌真實 fixture 驗公式、SKU 解析、色階、時區轉換、重置倒數 |
+| 離線 | `gh-csm selftest`：內嵌真實 fixture 驗公式、SKU 解析、色階、時區轉換、重置倒數、月份驗證 |
 | 靜態 | `shellcheck gh-csm`（0 錯誤） |
-| 實機唯讀 | `gh csm quota`（active 帳號）、`--all`、`--account`（缺 scope 帳號走解鎖提示） |
+| CI | `.github/workflows/ci.yml`：Ubuntu（bash 5.x）＋ macOS（`/bin/bash` 3.2）跑 shellcheck + selftest，零網路零 secrets |
+| 實機唯讀 | `gh csm quota`（active 帳號）、`--all`、`--account`（缺 scope 帳號走解鎖提示）、`--month`（歷史月） |
 | 寫入操作 | `stop` / `start` 只驗參數解析、選單渲染與 scope 檢查，不在開發期實際執行 |
 
 ---
@@ -400,3 +425,16 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 - **首發範圍**：`quota`（單次 billing 呼叫、三行面板）、`stop` / `start`（共用 picker）、
   多帳號（`--account` / `--all`）、離線 `selftest`。
 - **授權**：MIT，見 [LICENSE](LICENSE)。
+
+### 9.5 1.1.0：exit code、歷史月份、prebuild storage
+
+- **quota exit code 語意化**：全部要求的帳號成功渲染 = 0；任一帳號讀不到（缺 `user` scope /
+  billing 失敗）= 1，`--all` 印完所有面板後彙總。原本永遠 0，腳本與 CI 無法判斷成敗。
+- **`--month YYYY-MM`**：只對 quota 生效；未來月拒絕（錯誤附當前可用上限），當前月允許；
+  非當前月省略 `resets in …`，因為倒數只描述當前計費月。`set_billing_period` 接受覆寫參數，
+  月份驗證與 storage 換算可在 selftest 離線測試。
+- **prebuild storage 同池**：`Codespaces prebuild storage` 併入 storage 加總；字串由 SKU id
+  推導、未經實機驗證（§5.12），不認得就 warn，不會算錯。
+- **解鎖提示補切回**：非 active 帳號的三步提示包含切回目前 active，照做不再改掉使用者全域
+  gh 登入；active 帳號維持單行 refresh。
+- **CI**：Ubuntu + macOS 雙平台跑 shellcheck 與 selftest，覆蓋 bash 5.x 與 3.2。
