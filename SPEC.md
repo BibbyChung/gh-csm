@@ -175,8 +175,10 @@ Compute  ████████░░░░░░░░░░░░  43%   51.
 Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
 
 ── hubot · 2026-10 UTC · resets in 7d22h ────
-  ⚠ missing user scope — unlock: gh auth switch --user hubot && gh auth refresh -h github.com -s user,codespace
+  ⚠ missing user scope — unlock: gh auth switch --user hubot && gh auth refresh -h github.com -s user,codespace && gh auth switch --user octocat
 ```
+
+範例中 octocat 為 active，故解鎖提示為三步（切回原 active）；目標帳號本身是 active 時僅需 refresh 單步（見規則 7）。
 
 規則：
 
