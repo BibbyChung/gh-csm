@@ -64,6 +64,16 @@ For development (inside the repo, creates a symlink, edits take effect immediate
 gh extension install .
 ```
 
+### How releases work
+
+This is a script extension, so `main` is the release channel:
+
+- `gh extension install BibbyChung/gh-csm` clones the `main` branch HEAD — the latest commit on
+  `main` is the release.
+- `gh extension upgrade gh-csm` pulls the latest `main`; that is how you get a new version.
+- Git tags and GitHub Releases are informational only (a version marker and a changelog for
+  humans) — they play no role in install or upgrade.
+
 ## One-time scope unlock
 
 The billing endpoint only accepts the classic OAuth `user` scope; the `codespace` scope is for

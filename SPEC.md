@@ -302,6 +302,9 @@ fine-grained PAT 不支援；不要提供 PAT 路徑，少一條要維護的認�
 若之後發 release，asset 檔名**不要**長得像 `gh-csm-darwin-arm64`——gh 會誤判為
 binary extension 而走不同安裝路徑。目前不需要 release（`gh extension install` 直接 clone repo）。
 
+`main` 分支即發佈通道：安裝＝clone `main` HEAD、升級＝`git pull`；tag / release 僅供人閱讀，
+不參與安裝升級。
+
 ### 5.11 其他實作細節
 
 - `/user/codespaces` 預設分頁 30 筆，帶 `per_page=100`。
