@@ -70,7 +70,7 @@ GET https://api.github.com/users/{username}/settings/billing/usage?year=YYYY&mon
 }
 ```
 
-實測彙總（bb9755，2026-10 UTC，21 筆）：
+實測彙總（octocat，2026-10 UTC，21 筆）：
 
 | SKU | unitType | Σ quantity |
 |---|---|---|
@@ -162,7 +162,7 @@ gh csm help | --help | --version
 ### 4.2 quota 面板（每帳號一個）
 
 ```
-── bb9755 · 2026-10 UTC · resets in 7d22h ────
+── octocat · 2026-10 UTC · resets in 7d22h ────
 Compute  ████████░░░░░░░░░░░░  43%   51.98/120 core-hrs · 2-core 34h · 4-core 17h left
 Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
 ```
@@ -170,12 +170,12 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 `--all`：每帳號一個面板、空行分隔，`(active)` 只在此模式出現；缺 `user` scope 的帳號壓成單行提示。
 
 ```
-── bb9755 (active) · 2026-10 UTC · resets in 7d22h ────
+── octocat (active) · 2026-10 UTC · resets in 7d22h ────
 Compute  ████████░░░░░░░░░░░░  43%   51.98/120 core-hrs · 2-core 34h · 4-core 17h left
 Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
 
-── BibbyChung · 2026-10 UTC · resets in 7d22h ────
-  ⚠ missing user scope — unlock: gh auth switch --user BibbyChung && gh auth refresh -h github.com -s user,codespace
+── hubot · 2026-10 UTC · resets in 7d22h ────
+  ⚠ missing user scope — unlock: gh auth switch --user hubot && gh auth refresh -h github.com -s user,codespace
 ```
 
 規則：
@@ -240,7 +240,7 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 
 ### 4.6 selftest（零網路）
 
-內嵌 bb9755 2026-10 真實帳單 fixture，驗證：
+內嵌 octocat 2026-10 真實帳單 fixture，驗證：
 
 1. `sku_cores`：2 / 4 / 16 / 32-core 解析正確；未知 SKU 回非零。
 2. fixture 聚合：compute 51.98 core-hrs、storage 5.40 GB-h。

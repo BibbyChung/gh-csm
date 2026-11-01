@@ -8,7 +8,7 @@ you are at it.
 
 ```
 $ gh csm quota
-── bb9755 · 2026-10 UTC · resets in 7d22h ────
+── octocat · 2026-10 UTC · resets in 7d22h ────
 Compute  ████████░░░░░░░░░░░░  43%   51.98/120 core-hrs · 2-core 34h · 4-core 17h left
 Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
 ```
@@ -18,12 +18,12 @@ unlocked the `user` scope shrinks to a single hint line:
 
 ```
 $ gh csm quota --all
-── bb9755 (active) · 2026-10 UTC · resets in 7d22h ────
+── octocat (active) · 2026-10 UTC · resets in 7d22h ────
 Compute  ████████░░░░░░░░░░░░  43%   51.98/120 core-hrs · 2-core 34h · 4-core 17h left
 Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
 
-── BibbyChung · 2026-10 UTC · resets in 7d22h ────
-  ⚠ missing user scope — unlock: gh auth switch --user BibbyChung && gh auth refresh -h github.com -s user,codespace && gh auth switch --user bb9755
+── hubot · 2026-10 UTC · resets in 7d22h ────
+  ⚠ missing user scope — unlock: gh auth switch --user hubot && gh auth refresh -h github.com -s user,codespace && gh auth switch --user octocat
 ```
 
 ## Features
@@ -107,7 +107,7 @@ unlock line while the other accounts render normally.
 gh csm                        # help
 gh csm quota                  # quota panel (quota must be spelled out; there is no default subcommand)
 gh csm quota --all            # every signed-in account, panels stacked
-gh csm quota --account bb9755 # one account
+gh csm quota --account octocat # one account
 gh csm quota --month 2026-10  # a past UTC billing month (no reset countdown)
 
 gh csm stop                  # picker, then confirm

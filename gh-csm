@@ -820,7 +820,7 @@ cmd_selftest() {
   if [ $# -gt 0 ]; then
     die "selftest takes no arguments"
   fi
-  printf 'gh-csm %s selftest (offline fixtures, bb9755 2026-10 real billing)\n' "$VERSION"
+  printf 'gh-csm %s selftest (offline fixtures, octocat 2026-10 real billing)\n' "$VERSION"
 
   # SKU 核數解析
   st_eq "sku_cores 2-core" "2" "$(sku_cores 'Codespaces compute 2-core')"
