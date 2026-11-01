@@ -387,3 +387,13 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 - **不做舊名 alias**：兩套名字並存等於永久背兩份介面與測試；舊名一律 unknown subcommand。
 - **同步範圍**：usage / help / 錯誤訊息 / picker 動詞 / README / 本文件。
   `Command to run`、`Waking … and running:` 是一般英文，不是子命令名，維持原樣。
+
+### 9.4 首次公開發布（1.0.0）
+
+首次公開發布於 [BibbyChung/gh-csm](https://github.com/BibbyChung/gh-csm)，tag `v1.0.0`。
+
+- **公開起點即 1.0.0**：命令面（`quota` / `stop` / `start`）、輸出格式與 API 契約已定案，
+  安裝者不必再跟一次改名；0.1.0–0.3.0 是發布前的內部迭代，不另發佈。
+- **首發範圍**：`quota`（單次 billing 呼叫、三行面板）、`stop` / `start`（共用 picker）、
+  多帳號（`--account` / `--all`）、離線 `selftest`。
+- **授權**：MIT，見 [LICENSE](LICENSE)。

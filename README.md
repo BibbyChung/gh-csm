@@ -49,7 +49,7 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 ## Install
 
 ```bash
-gh extension install <owner>/gh-csm
+gh extension install BibbyChung/gh-csm
 ```
 
 After that `gh csm ...` works. Upgrade:
@@ -147,3 +147,7 @@ shellcheck gh-csm
 ```
 
 Design decisions, API contract, formulas and the minefield list live in [SPEC.md](SPEC.md).
+
+## License
+
+[MIT](LICENSE)
