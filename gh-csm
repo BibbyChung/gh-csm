@@ -7,7 +7,7 @@
 # Why the code looks conservative: macOS ships /bin/bash 3.2.57, so no
 # associative arrays, no mapfile/readarray, no ${var,,}, no &>>.
 
-# LC_ALL=C：gawk 在逗號小數 locale（如 de_DE）會讓 printf "%.2f" 印出 "51,98"；C locale 固定小數點，輸出全 ASCII 無副作用。
+# LC_ALL=C：gawk 在逗號小數 locale（如 de_DE）會讓 printf "%.2f" 印出 "51,98"；C locale 只固定 awk 數值格式化的小數點。面板的 █ · ─ — 是腳本內字面值，LC_ALL 不影響其透傳輸出。
 export LC_ALL=C
 
 set -euo pipefail
