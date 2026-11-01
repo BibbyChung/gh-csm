@@ -7,9 +7,12 @@
 # Why the code looks conservative: macOS ships /bin/bash 3.2.57, so no
 # associative arrays, no mapfile/readarray, no ${var,,}, no &>>.
 
+# LC_ALL=C：gawk 在逗號小數 locale（如 de_DE）會讓 printf "%.2f" 印出 "51,98"；C locale 固定小數點，輸出全 ASCII 無副作用。
+export LC_ALL=C
+
 set -euo pipefail
 
-VERSION="0.2.1"
+VERSION="0.3.0"
 BAR_WIDTH=20
 COMPUTE_LIMIT="${GH_CSM_COMPUTE_LIMIT:-120}"
 STORAGE_LIMIT="${GH_CSM_STORAGE_LIMIT:-15}"
@@ -52,38 +55,38 @@ usage() {
 gh-csm — GitHub Codespaces quota dashboard & manager
 
 Usage:
-  gh csm dash [--account <login> | --all]
+  gh csm quota [--account <login> | --all]
   gh csm stop [-c <name>] [--account <login>]
-  gh csm run [-c <name>] [snippet] [--account <login>]
+  gh csm start [-c <name>] [snippet] [--account <login>]
   gh csm selftest
   gh csm help
 
 Commands:
-  dash        Quota panel: compute / storage usage and reset countdown
+  quota       Quota panel: compute / storage usage and reset countdown
   stop        Stop a codespace (interactive picker without -c)
-  run         Wake a codespace and run a snippet; omit snippet for an interactive shell
+  start       Wake a codespace and run a snippet; omit snippet for an interactive shell
   selftest    Offline fixture self-test (no network)
 
 Account:
   Defaults to the gh active account.
   --account <login>   Use a signed-in account (also --account=<login>)
-  --all               Every signed-in account, panels stacked (dash only)
+  --all               Every signed-in account, panels stacked (quota only)
 
 Quota limits (GitHub Free defaults):
   GH_CSM_COMPUTE_LIMIT=120   core-hours / month
   GH_CSM_STORAGE_LIMIT=15    GB-month / month
-  Pro accounts: GH_CSM_COMPUTE_LIMIT=180 GH_CSM_STORAGE_LIMIT=20 gh csm dash
+  Pro accounts: GH_CSM_COMPUTE_LIMIT=180 GH_CSM_STORAGE_LIMIT=20 gh csm quota
 
 Requirements:
   gh (signed in with gh auth login; needs user and codespace scopes), jq
   Missing scope unlock: gh auth switch --user <login> && gh auth refresh -h github.com -s user,codespace
 
 Examples:
-  gh csm dash
-  gh csm dash --all
+  gh csm quota
+  gh csm quota --all
   gh csm stop
-  gh csm run
-  gh csm run -c my-codespace 'echo gogogo...'
+  gh csm start
+  gh csm start -c my-codespace 'echo gogogo...'
 EOF
 }
 
@@ -298,7 +301,7 @@ load_auth() {
   need_cmd gh
   need_cmd jq
   if [ "$GH_CSM_IGNORED_TOKEN" -eq 1 ]; then
-    warn "ignoring GITHUB_TOKEN env var (it shadows gh login, common inside codespaces)"
+    warn "ignoring GITHUB_TOKEN env var (it shadows gh login, common inside codespaces) — inside a codespace? run gh auth login once"
   fi
   if ! AUTH_JSON=$(gh auth status --json hosts 2>/dev/null); then
     die "gh is not signed in, or gh is too old (2.40+ required). Run: gh auth login"
@@ -532,11 +535,11 @@ parse_account_flags() {
   done
 }
 
-cmd_dash() {
+cmd_quota() {
   local accounts acct first
   parse_account_flags "$@"
   if [ "${#REST[@]}" -gt 0 ]; then
-    die "dash: unknown argument ${REST[0]} (try gh csm help)"
+    die "quota: unknown argument ${REST[0]} (try gh csm help)"
   fi
   validate_limits
   load_auth
@@ -645,7 +648,7 @@ cmd_stop() {
   gh_as "$login" codespace stop -c "$PICK_NAME"
 }
 
-cmd_run() {
+cmd_start() {
   local name snippet have_snippet login arg idx cs
   name=""
   snippet=""
@@ -668,7 +671,7 @@ cmd_run() {
           idx=$((idx + 1))
         done
         ;;
-      *) die "run: unknown argument ${REST[0]} (try gh csm help)" ;;
+      *) die "start: unknown argument ${REST[0]} (try gh csm help)" ;;
     esac
   fi
   validate_limits
@@ -678,7 +681,7 @@ cmd_run() {
 
   if [ -z "$name" ]; then
     if [ ! -t 0 ]; then
-      die "run requires -c <name> in non-interactive mode"
+      die "start requires -c <name> in non-interactive mode"
     fi
     if ! cs=$(fetch_codespaces "$login"); then
       die "could not read the codespace list for $login"
@@ -686,7 +689,7 @@ cmd_run() {
     if [ -z "$cs" ]; then
       die "account $login has no codespaces"
     fi
-    if ! pick_codespace "$cs" run; then
+    if ! pick_codespace "$cs" start; then
       return 0
     fi
     name="$PICK_NAME"
@@ -832,17 +835,17 @@ main() {
     --version|-v)
       printf 'gh-csm %s\n' "$VERSION"
       ;;
-    dash)
+    quota)
       shift
-      cmd_dash "$@"
+      cmd_quota "$@"
       ;;
     stop)
       shift
       cmd_stop "$@"
       ;;
-    run)
+    start)
       shift
-      cmd_run "$@"
+      cmd_start "$@"
       ;;
     selftest)
       shift

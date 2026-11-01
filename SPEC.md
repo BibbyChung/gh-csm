@@ -132,24 +132,24 @@ storage_pct        = floor(storage_gb_month  / storage_limit  × 100)
 ### 4.1 CLI 介面
 
 ```
-gh csm                                  # help（不做 dash fallback）
-gh csm dash [--account <login> | --account=<login> | --all]
+gh csm                                  # help（不做 quota fallback）
+gh csm quota [--account <login> | --account=<login> | --all]
 gh csm stop [-c <name>] [--account <login> | --account=<login>]
-gh csm run [-c <name>] [snippet] [--account <login> | --account=<login>]
+gh csm start [-c <name>] [snippet] [--account <login> | --account=<login>]
 gh csm selftest
 gh csm help | --help | --version
 ```
 
-- 帳號預設 = gh 的 active 帳號；`--account` 指定；`--all` 逐一堆疊面板（僅 dash）。
+- 帳號預設 = gh 的 active 帳號；`--account` 指定；`--all` 逐一堆疊面板（僅 quota）。
 - `--account` 空白與等號兩種形式皆可；`--all`、`-c` 只有空白形式（`--all=1`、`-c=x` 視為未知參數）。
-- `-c` 與 `--codespace` 同義（`stop` / `run`）。
-- `stop` / `run` 不支援 `--all`（一次一個帳號）。
-- `stop` / `run` 不帶 `-c` 且 stdin 是 TTY：開共用互動選單 `pick_codespace`（§4.3.1）；
-  `run` 選定後再提示指令（Enter = 互動 shell，§4.4）。
+- `-c` 與 `--codespace` 同義（`stop` / `start`）。
+- `stop` / `start` 不支援 `--all`（一次一個帳號）。
+- `stop` / `start` 不帶 `-c` 且 stdin 是 TTY：開共用互動選單 `pick_codespace`（§4.3.1）；
+  `start` 選定後再提示指令（Enter = 互動 shell，§4.4）。
 - 不帶 `-c` 且非 TTY：明確報錯，不在 CI 卡住。
 - 未知子命令 / 未知旗標：訊息 + usage，exit 1。
 
-### 4.2 dash 面板（每帳號一個）
+### 4.2 quota 面板（每帳號一個）
 
 ```
 ── bb9755 · 2026-10 UTC · resets in 7d22h ────
@@ -176,8 +176,8 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
    時數整數向下取整，`2-core … left` 整段以粗體＋進度條同色標示（非 TTY / `NO_COLOR` 時退化為純文字）。
 4. Storage 行恆顯示（無顯示門檻）；`storage_pct == 0` 且用量 > 0 → `<1%`；數值 2 位小數；
    不再顯示 GB-h ÷ 小時的換算細節。
-5. dash 不含 codespace 清單與行動建議（理由見 §9.1），**只呼叫 billing API**；
-   `fetch_codespaces` 僅供 `stop` / `run` 的選單使用。
+5. quota 不含 codespace 清單與行動建議（理由見 §9.1），**只呼叫 billing API**；
+   `fetch_codespaces` 僅供 `stop` / `start` 的選單使用。
 6. 顏色只在 stdout 是 TTY 且 `NO_COLOR` 未設時輸出。
 7. 缺 `user` scope 的帳號：只顯示單行解鎖提示（`⚠ missing user scope — unlock: …`），
    不呼叫 billing API、不影響其他帳號。
@@ -194,21 +194,21 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 - 非 TTY 且無 `-c` → 直接報錯（避免在 CI 卡住）。
 - 內部是 `gh codespace stop` 的薄包裝，不自己打 POST。
 
-#### 4.3.1 `pick_codespace`（stop / run 共用）
+#### 4.3.1 `pick_codespace`（stop / start 共用）
 
 - 輸入：`fetch_codespaces` 的 TSV（name / state / cpus / last_used_at / repository）；
   第二參數為動詞，組出提示 `Select which codespace to <verb> (q to cancel): `。
 - 輸出：全域 `PICK_NAME`、`PICK_STATE`（選定的 name / state）。
 - `q`：印 `Cancelled`，回 1（呼叫端視為正常結束，不再動作）。
 - 非數字輸入或編號超界：`die`（英文訊息）。
-- 列表渲染只此一份，`stop` 與 `run` 不得各自複製。
+- 列表渲染只此一份，`stop` 與 `start` 不得各自複製。
 
-### 4.4 run
+### 4.4 start
 
 - 無 `-c` 且 stdin 是 TTY：`pick_codespace` 選定後提示
   `Command to run (Enter for interactive shell): `；輸入非空 = snippet（跑完退出），
   Enter = 互動 shell。
-- 無 `-c` 且非 TTY：`run requires -c <name> in non-interactive mode`。
+- 無 `-c` 且非 TTY：`start requires -c <name> in non-interactive mode`。
 - `gh codespace ssh` 為底：選到 Shutdown 的 codespace 是合法操作，gh 會自動喚醒（原始碼
   `waitUntilCodespaceConnectionReady` 會對 Shutdown 狀態呼叫 `StartCodespace`，上限 5 分鐘）。
 - 有 snippet：`gh codespace ssh -c <name> -- "<snippet>"`，執行完退出。
@@ -256,8 +256,8 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 ### 5.2 計費月是 UTC
 
 本地 11/1 凌晨時 UTC 仍是 10/31，查「11 月」會拿到空陣列——這不是 bug。
-查詢鎖 UTC 月；dash 的 header 與重置倒數也全走 UTC，所以不再另註本地交界。
-只有 `stop` / `run` 選單的 last used 轉成本地時間。
+查詢鎖 UTC 月；quota 的 header 與重置倒數也全走 UTC，所以不再另註本地交界。
+只有 `stop` / `start` 選單的 last used 轉成本地時間。
 
 ### 5.3 `netAmount == 0` 過濾會漏抓超額
 
@@ -279,7 +279,7 @@ grossAmount 0.028460376，即 ×0.07/730）。金額僅供參考，計算只用 
 ### 5.6 Shutdown 的 codespace 仍持續計 storage
 
 實測 shutdown 狀態每天仍有 +0.13~0.18 GB-h。所以「刪除優先於停止」。
-dash 不再列清單（§9.1）：要停用 `gh csm stop`，要真的止血用 `gh codespace delete`。
+quota 不再列清單（§9.1）：要停用 `gh csm stop`，要真的止血用 `gh codespace delete`。
 
 ### 5.7 `gh auth refresh` 沒有 `--user`
 
@@ -309,6 +309,8 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 - `gh codespace ssh` 的參數解析是「第一個非旗標參數之後全部視為 command」，
   用 `--` 分隔最安全（snippet 以 `-` 開頭時也不會被當旗標）。
 - 顏色需判斷 TTY，否則管線輸出會夾 ANSI escape。
+- 小數點：程式開頭 `export LC_ALL=C`。gawk 在逗號小數 locale（如 `de_DE`）會讓
+  `printf "%.2f"` 印出 `51,98`；C locale 固定小數點，輸出全 ASCII 無副作用。
 
 ---
 
@@ -318,8 +320,8 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 |---|---|
 | 離線 | `gh-csm selftest`：內嵌真實 fixture 驗公式、SKU 解析、色階、時區轉換、重置倒數 |
 | 靜態 | `shellcheck gh-csm`（0 錯誤） |
-| 實機唯讀 | `gh csm dash`（active 帳號）、`--all`、`--account`（缺 scope 帳號走解鎖提示） |
-| 寫入操作 | `stop` / `run` 只驗參數解析、選單渲染與 scope 檢查，不在開發期實際執行 |
+| 實機唯讀 | `gh csm quota`（active 帳號）、`--all`、`--account`（缺 scope 帳號走解鎖提示） |
+| 寫入操作 | `stop` / `start` 只驗參數解析、選單渲染與 scope 檢查，不在開發期實際執行 |
 
 ---
 
@@ -351,27 +353,37 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 
 ## 9. 設計決策記錄
 
-### 9.1 dash 極簡化（0.2.0）
+### 9.1 面板極簡化（0.2.0）
 
-使用者實跑後回饋「資訊太多」，0.2.0 把 dash 收成三行：header（帳號／UTC 月／離重置倒數）
+使用者實跑後回饋「資訊太多」，0.2.0 把面板收成三行：header（帳號／UTC 月／離重置倒數）
 ＋ compute 一行 ＋ storage 一行。
 
 - **移除**：codespace 清單、行動建議、「建議」區塊、頁尾結算延遲註記、獨立計費月行、
   本地／UTC 交界註記、GB-h ÷ 小時的換算細節。
-- **職責搬遷**：清單與「挑一個停掉」的操作本來就是 `stop` 的互動選單在做，dash 不再重複。
-- **副作用（正面）**：dash 只剩一次 billing API 呼叫，不再需要 `codespace` scope；
+- **職責搬遷**：清單與「挑一個停掉」的操作本來就是 `stop` 的互動選單在做，面板不再重複。
+- **副作用（正面）**：面板只剩一次 billing API 呼叫，不再需要 `codespace` scope；
   `fetch_codespaces` 保留給 `stop`。
 - **期待管理**：「約每小時結算一次」從輸出移到 README，需要時再查。
 
-### 9.2 介面英文化與 `run` 選單（0.2.1）
+### 9.2 介面英文化與共用選單（0.2.1）
 
 公開發布前把使用者可見輸出與 README 轉英文；SPEC 與程式碼註解維持中文（內部文件與維護者語言）。
 
-- **範圍**：usage / help、`die` / `warn` 訊息、dash 面板、`stop` / `run` 選單與確認、
+- **範圍**：usage / help、`die` / `warn` 訊息、面板、`stop` / `start` 選單與確認、
   selftest 輸出、`--version`、README。程式碼註解與本文件不動。
-- **dash 版面不變，只換字串**：header 為 `resets in <countdown>`，compute 行為
+- **面板版面不變，只換字串**：header 為 `resets in <countdown>`，compute 行為
   `2-core <N>h · 4-core <M>h left`；粗體＋狀態色改為覆蓋整個 `2-core … left` 片段（含 `left`）。
-- **`run` 無 `-c`**：與 `stop` 共用 `pick_codespace`（§4.3.1），選定後提示
+- **`start` 無 `-c`**：與 `stop` 共用 `pick_codespace`（§4.3.1），選定後提示
   `Command to run (Enter for interactive shell): `；Enter = 互動 shell。
   非 TTY 直接報錯，行為對映 `stop`。
 - **不做 i18n 框架**：單一語言、單一檔案，字串直接寫死；真要加語言時再抽成字串表。
+
+### 9.3 子命令改名 `quota` / `start`（0.3.0）
+
+公開發布前一次定案，避免安裝者學一套名字後再改一輪（churn）。
+
+- **`quota`**：面板講的就是額度，名字自解釋；`--account` / `--all` 仍是它的旗標。
+- **`start`**：與 `stop` 對稱（start / stop），語意也比「喚醒並執行」的舊動詞直接。
+- **不做舊名 alias**：兩套名字並存等於永久背兩份介面與測試；舊名一律 unknown subcommand。
+- **同步範圍**：usage / help / 錯誤訊息 / picker 動詞 / README / 本文件。
+  `Command to run`、`Waking … and running:` 是一般英文，不是子命令名，維持原樣。

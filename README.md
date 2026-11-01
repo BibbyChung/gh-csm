@@ -5,7 +5,7 @@ how much compute / storage quota is left this month, and stops or wakes a codesp
 you are at it.
 
 ```
-$ gh csm dash
+$ gh csm quota
 ── bb9755 · 2026-10 UTC · resets in 7d22h ────
 Compute  ████████░░░░░░░░░░░░  43%   51.98/120 core-hrs · 2-core 34h · 4-core 17h left
 Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
@@ -15,7 +15,7 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 unlocked the `user` scope shrinks to a single hint line:
 
 ```
-$ gh csm dash --all
+$ gh csm quota --all
 ── bb9755 (active) · 2026-10 UTC · resets in 7d22h ────
 Compute  ████████░░░░░░░░░░░░  43%   51.98/120 core-hrs · 2-core 34h · 4-core 17h left
 Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.01/15 GB-month
@@ -26,13 +26,13 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 
 ## Features
 
-- **dash**: three lines and done — compute / storage bars (green <70%, yellow 70–89%,
+- **quota**: three lines and done — compute / storage bars (green <70%, yellow 70–89%,
   red ≥90%), the remaining core-hours converted to 2-core / 4-core hours (integers, rounded
   down, never overreported), and a reset countdown in the header (`7d22h` / `5h` / `42m`).
-  Lists and actions live in `stop`; dash makes a single billing API call.
+  Lists and actions live in `stop`; quota makes a single billing API call.
 - **stop**: without arguments it is an interactive picker (pick a number, then confirm);
   `-c <name>` stops directly.
-- **run**: wakes the codespace and runs a snippet, or drops into an interactive shell when the
+- **start**: wakes the codespace and runs a snippet, or drops into an interactive shell when the
   snippet is omitted (a stopped codespace wakes automatically). Without `-c` it opens the same
   picker as `stop`, then asks for the command — Enter means interactive shell.
 - **Multiple accounts**: the gh active account by default, `--account <login>` to pick one,
@@ -44,6 +44,7 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 - `gh` (2.40+, already `gh auth login`ed)
 - `jq`
 - bash 3.2 or newer (macOS ships 3.2.57 as `/bin/bash`, which is fine)
+- Supported platforms: macOS and Linux (any environment with bash 3.2+, gh 2.40+, jq).
 
 ## Install
 
@@ -87,17 +88,17 @@ unlock line while the other accounts render normally.
 ## Usage
 
 ```bash
-gh csm                       # help
-gh csm dash                  # quota panel (dash must be spelled out; there is no default subcommand)
-gh csm dash --all            # every signed-in account, panels stacked
-gh csm dash --account bb9755 # one account
+gh csm                        # help
+gh csm quota                  # quota panel (quota must be spelled out; there is no default subcommand)
+gh csm quota --all            # every signed-in account, panels stacked
+gh csm quota --account bb9755 # one account
 
 gh csm stop                  # picker, then confirm
 gh csm stop -c my-codespace  # stop directly
 
-gh csm run                                 # picker, then prompt for a command (Enter = shell)
-gh csm run -c my-codespace 'echo gogogo...'   # wake + run, exit when done
-gh csm run -c my-codespace                    # wake + interactive shell
+gh csm start                                 # picker, then prompt for a command (Enter = shell)
+gh csm start -c my-codespace 'echo gogogo...'   # wake + run, exit when done
+gh csm start -c my-codespace                    # wake + interactive shell
 
 gh csm selftest              # offline self-test
 ```
@@ -108,7 +109,7 @@ Defaults are GitHub Free: 120 core-hours + 15 GB-month. Pro (180 / 20) or any ot
 environment variable override:
 
 ```bash
-GH_CSM_COMPUTE_LIMIT=180 GH_CSM_STORAGE_LIMIT=20 gh csm dash
+GH_CSM_COMPUTE_LIMIT=180 GH_CSM_STORAGE_LIMIT=20 gh csm quota
 ```
 
 To make it permanent, put it in your shell rc:
@@ -124,7 +125,7 @@ The API does not expose the account's plan, so this is the only way.
 
 - **Numbers lag**: GitHub billing settles roughly once an hour, so a codespace you just stopped
   will not show up immediately.
-- **Billing month is UTC**: dash's month and reset countdown are UTC. Near the end/start of a
+- **Billing month is UTC**: quota's month and reset countdown are UTC. Near the end/start of a
   month your local date can fall in a different month; that is expected. Only the `stop`
   picker's last used is converted to local time.
 - **Shutdown still bills storage**: stopping only stops compute; storage keeps accruing. Delete
@@ -136,7 +137,7 @@ The API does not expose the account's plan, so this is the only way.
   login; the tool ignores it and says so once. If you still get 403, `unset GITHUB_TOKEN` and
   rerun.
 - **github.com only**, no GitHub Enterprise Server.
-- `stop` / `run` need the `codespace` scope; the quota section of `dash` needs `user`.
+- `stop` / `start` need the `codespace` scope; `quota` needs `user` for billing.
 
 ## Development
 
