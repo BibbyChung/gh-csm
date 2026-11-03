@@ -78,7 +78,7 @@ This is a script extension, so `main` is the release channel:
   `main` is the release.
 - `gh extension upgrade gh-csm` pulls the latest `main`; that is how you get a new version.
 - Git tags are informational only: a version anchor for humans, compare links and `--pin`. They
-  play no role in install or upgrade.
+  play no role in the default install or upgrade path.
 
 Releasing takes three steps:
 
