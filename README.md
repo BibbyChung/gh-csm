@@ -35,6 +35,9 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
   Lists and actions live in `stop`; quota makes a single billing API call.
 - **stop**: without arguments it is an interactive picker (pick a number, then confirm);
   `-c <name>` stops directly.
+- **ls**: `gh codespace list`, verbatim — same table, colors, pager and exit code. The only thing
+  `csm` adds is `--account <login>` to choose which signed-in identity runs it; everything else is
+  forwarded to `gh` as typed.
 - **start**: wakes the codespace and runs a snippet, or drops into an interactive shell when the
   snippet is omitted (a stopped codespace wakes automatically). Without `-c` it opens the same
   picker as `stop`, then asks for the command — Enter means interactive shell.
@@ -110,6 +113,9 @@ gh csm quota --all            # every signed-in account, panels stacked
 gh csm quota --account octocat # one account
 gh csm quota --month 2026-10  # a past UTC billing month (no reset countdown)
 
+gh csm ls                     # gh codespace list for the active account
+gh csm ls --account octocat   # same, for one account; other args go straight to gh
+
 gh csm stop                  # picker, then confirm
 gh csm stop -c my-codespace  # stop directly
 
@@ -137,6 +143,9 @@ panel and exits 1 if at least one account failed.
 |---|---|
 | 0 | every requested account rendered |
 | 1 | bad arguments / auth error, or at least one requested account unreadable |
+
+`ls` defines no exit codes of its own: whatever `gh codespace list` returns is passed through
+unchanged.
 
 ### Quota limits
 
@@ -176,7 +185,7 @@ The API does not expose the account's plan, so this is the only way.
   login; the tool ignores it and says so once. If you still get 403, `unset GITHUB_TOKEN` and
   rerun.
 - **github.com only**, no GitHub Enterprise Server.
-- `stop` / `start` need the `codespace` scope; `quota` needs `user` for billing.
+- `ls` / `stop` / `start` need the `codespace` scope; `quota` needs `user` for billing.
 
 ## Development
 

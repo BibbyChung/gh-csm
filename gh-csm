@@ -12,7 +12,7 @@ export LC_ALL=C
 
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 BAR_WIDTH=20
 COMPUTE_LIMIT="${GH_CSM_COMPUTE_LIMIT:-120}"
 STORAGE_LIMIT="${GH_CSM_STORAGE_LIMIT:-15}"
@@ -58,6 +58,7 @@ gh-csm — GitHub Codespaces quota dashboard & manager
 
 Usage:
   gh csm quota [--account <login> | --all] [--month <YYYY-MM>]
+  gh csm ls [gh codespace list args] [--account <login>]
   gh csm stop [-c <name>] [--account <login>]
   gh csm start [-c <name>] [snippet] [--account <login>]
   gh csm selftest
@@ -65,6 +66,7 @@ Usage:
 
 Commands:
   quota       Quota panel: compute / storage usage and reset countdown
+  ls          gh codespace list verbatim; --account picks the identity
   stop        Stop a codespace (interactive picker without -c)
   start       Wake a codespace and run a snippet; omit snippet for an interactive shell
   selftest    Offline fixture self-test (no network)
@@ -91,6 +93,7 @@ Examples:
   gh csm quota
   gh csm quota --all
   gh csm quota --month 2026-10
+  gh csm ls
   gh csm stop
   gh csm start
   gh csm start -c my-codespace 'echo gogogo...'
@@ -792,6 +795,25 @@ cmd_start() {
   fi
 }
 
+cmd_ls() {
+  local login
+  parse_account_flags "$@"
+  if [ "$MONTH_SET" -eq 1 ]; then
+    die "--month only applies to quota"
+  fi
+  load_auth
+  login=$(resolve_login)
+  require_scope "$login" codespace
+
+  # pass-through：不捕捉、不接管線，gh 的表格／顏色／pager／exit code 直接穿透。
+  # 空 REST 必須走無參數分支：bash 3.2 + set -u 展開空陣列會 unbound。
+  if [ "${#REST[@]}" -gt 0 ]; then
+    gh_as "$login" codespace list "${REST[@]}"
+  else
+    gh_as "$login" codespace list
+  fi
+}
+
 # ---------- selftest（零網路） ----------
 
 ST_PASS=0
@@ -816,7 +838,7 @@ st_near() {
 }
 
 cmd_selftest() {
-  local fixture totals compute storage hours gbm warn_out epoch_a epoch_b msg ym
+  local fixture totals compute storage hours gbm warn_out epoch_a epoch_b msg ym out
   if [ $# -gt 0 ]; then
     die "selftest takes no arguments"
   fi
@@ -939,6 +961,49 @@ cmd_selftest() {
   st_eq "bar 0% all empty" "$empty" "$(bar 0)"
   st_eq "bar 100% all full" "$full" "$(bar 100)"
 
+  # ls：pass-through 轉發。gh 存取層在 subshell 內 stub，零網路。
+  # --account 被消費、其餘參數原序轉發。
+  out=$(
+    gh_as() { printf '%s\n' "$*"; }
+    load_auth() { :; }
+    require_scope() { :; }
+    resolve_login() { printf 'octocat\n'; }
+    cmd_ls --account octocat -L 5 --json name
+  )
+  st_eq "ls forwards argv after --account" \
+    "octocat codespace list -L 5 --json name" "$out"
+
+  # 空 REST：無參數分支，不可踩 bash 3.2 + set -u 的空陣列展開。
+  out=$(
+    gh_as() { printf '%s\n' "$*"; }
+    load_auth() { :; }
+    require_scope() { :; }
+    resolve_login() { printf 'octocat\n'; }
+    cmd_ls
+  )
+  st_eq "ls with no flags calls bare gh codespace list" "octocat codespace list" "$out"
+
+  # --month 不適用（die 在 load_auth 之前，無須 stub）。
+  if out=$( ( cmd_ls --month 2026-10 ) 2>&1 ); then
+    st_bad "ls rejects --month" "exit 1" "exit 0"
+  else
+    case "$out" in
+      *"--month only applies to quota"*) st_ok "ls rejects --month" ;;
+      *) st_bad "ls rejects --month" 'contains "--month only applies to quota"' "$out" ;;
+    esac
+  fi
+
+  # --all：ls 沿用真的 resolve_login 拒絕路徑。die 在 $(resolve_login) 內只結束該
+  # 替換子shell（正式執行靠頂層 set -e 中止），所以這裡直接驗未 stub 的共用函式。
+  if out=$( ( ALL=1; resolve_login ) 2>&1 ); then
+    st_bad "ls rejects --all via resolve_login" "exit 1" "exit 0"
+  else
+    case "$out" in
+      *"--all does not apply to this subcommand"*) st_ok "ls rejects --all via resolve_login" ;;
+      *) st_bad "ls rejects --all via resolve_login" 'contains "--all does not apply"' "$out" ;;
+    esac
+  fi
+
   printf '\nselftest: %d passed, %d failed\n' "$ST_PASS" "$ST_FAIL"
   if [ "$ST_FAIL" -gt 0 ]; then
     exit 1
@@ -959,6 +1024,10 @@ main() {
     quota)
       shift
       cmd_quota "$@"
+      ;;
+    ls)
+      shift
+      cmd_ls "$@"
       ;;
     stop)
       shift

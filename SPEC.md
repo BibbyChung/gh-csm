@@ -141,6 +141,7 @@ storage_pct        = floor(storage_gb_month  / storage_limit  × 100)
 ```
 gh csm                                  # help（不做 quota fallback）
 gh csm quota [--account <login> | --account=<login> | --all] [--month <YYYY-MM> | --month=<YYYY-MM>]
+gh csm ls [gh codespace list args] [--account <login> | --account=<login>]
 gh csm stop [-c <name>] [--account <login> | --account=<login>]
 gh csm start [-c <name>] [snippet] [--account <login> | --account=<login>]
 gh csm selftest
@@ -153,6 +154,8 @@ gh csm help | --help | --version
   月 01–12；晚於當前 UTC 月直接報錯並附目前可用上限，當前月允許，過去月份不設下限。
   空白與等號兩種形式皆可。
 - `-c` 與 `--codespace` 同義（`stop` / `start`）。
+- `ls` 是 `gh codespace list` 的 pass-through（§4.7）：只消費 csm 自己的 `--account`，其餘參數
+  原序轉發；`--all` / `--month` 不適用（直接報錯）。
 - `stop` / `start` 不支援 `--all`（一次一個帳號）。
 - `stop` / `start` 不帶 `-c` 且 stdin 是 TTY：開共用互動選單 `pick_codespace`（§4.3.1）；
   `start` 選定後再提示指令（Enter = 互動 shell，§4.4）。
@@ -259,9 +262,28 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 13. prebuild storage 與一般 storage 同池計入，且不觸發未知 SKU 警告。
 14. `--month` 驗證：合法（2024-02、當前 UTC 月）、格式錯、`00`、`13`、未來月
     （錯誤訊息含 `latest available`）；`set_billing_period` 覆寫可離線測試。
+15. `ls` 轉發：subshell 內 stub `gh_as` / `load_auth` / `require_scope`，驗 `--account` 被消費、
+    其餘參數原序轉發、無參數不炸（空 `REST` 護欄）、`--month` 與 `--all`（真的
+    `resolve_login`）被拒。
 
 任一失敗 → 印「期望 vs 實際」並 exit 1；全過 → exit 0。
-輸出（標題、案例名稱、`selftest: 38 passed, 0 failed`）為英文，共 38 項，與其他使用者可見輸出一致。
+輸出（標題、案例名稱、`selftest: 42 passed, 0 failed`）為英文，共 42 項，與其他使用者可見輸出一致。
+
+### 4.7 ls
+
+- `gh csm ls` 是 `gh codespace list` 的薄包裝：csm 只消費自己的 `--account`（含等號形式），
+  其餘參數原序留在 `REST` 轉發給 gh。
+- **stream-through 是不可協商的紅線**：不捕捉 stdout（無 `$(...)`）、不接管線、不套自訂 pager、
+  不重排表格、不改顏色與 TTY 判斷；`gh codespace list` 的 exit code 原樣成為本子命令的 exit code。
+  旗標與欄位因此不在本文件複刻（避免 gh 版本漂移造成文件過時），`--json` 等上游輸出直接穿透。
+- 身分：`load_auth` → `resolve_login`（預設 active 帳號）→ `require_scope <login> codespace` →
+  `gh_as <login> codespace list …`，輸出即該帳號的 `gh codespace list`。
+- `--all` 不適用：沿用 `resolve_login` 的共用拒絕（`--all does not apply to this subcommand`）。
+- `--month` 不適用：比照 stop / start 的 `--month only applies to quota`。
+- `-h` / `--help` 由 `parse_account_flags` 攔截，印 csm 自己的 usage，不是
+  `gh codespace list --help`；要查上游旗標請直接跑 `gh codespace list --help`。
+- 無參數時走無參數分支；必須以 `[ "${#REST[@]}" -gt 0 ]` 護欄判斷，bash 3.2 + `set -u` 下
+  展開空陣列會 unbound。
 
 ---
 
@@ -347,10 +369,10 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 
 | 層級 | 方式 |
 |---|---|
-| 離線 | `gh-csm selftest`：內嵌真實 fixture 驗公式、SKU 解析、色階、時區轉換、重置倒數、月份驗證 |
+| 離線 | `gh-csm selftest`：內嵌真實 fixture 驗公式、SKU 解析、色階、時區轉換、重置倒數、月份驗證、`ls` 參數轉發與拒絕 |
 | 靜態 | `shellcheck gh-csm`（0 錯誤） |
 | CI | `.github/workflows/ci.yml`：Ubuntu（bash 5.x）＋ macOS（`/bin/bash` 3.2）跑 shellcheck + selftest，零網路零 secrets |
-| 實機唯讀 | `gh csm quota`（active 帳號）、`--all`、`--account`（缺 scope 帳號走解鎖提示）、`--month`（歷史月） |
+| 實機唯讀 | `gh csm quota`（active 帳號）、`--all`、`--account`（缺 scope 帳號走解鎖提示）、`--month`（歷史月）、`gh csm ls`（含 `--account`） |
 | 寫入操作 | `stop` / `start` 只驗參數解析、選單渲染與 scope 檢查，不在開發期實際執行 |
 
 ---
@@ -358,7 +380,7 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 ## 7. 未實作（刻意）
 
 - `--watch` 常駐刷新（資料源本身延遲約 1 小時，收益低）。
-- `ls` / `rm` / `ssh` 等原生子命令的再包裝（`gh codespace` 已有）。
+- `rm` / `ssh` 等原生子命令的再包裝（`gh codespace` 已有；理由見 §9.6）。
 - 額度方案自動偵測（API 查不出 Free/Pro，只能靠環境變數覆寫）。
 - 跨 host（僅 `github.com`）。
 
@@ -374,6 +396,9 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 - 檔案超過約 1500 行。
 - 出現新子系統：`--watch` 常駐刷新、組態檔（如 `~/.config/gh-csm/`）、
   JSON／其他機器可讀輸出格式。
+
+註：`ls` 轉發 gh 的輸出（含 `--json`）不算新增 JSON 子系統——csm 不解析也不產生該格式，
+只是把子行程的 stdout 原樣穿透，不觸發拆檔。
 
 **拆法**：`lib/` 下按子系統切檔（`auth` / `billing` / `panel` / `selftest`），
 機械式 `git mv` 搬移後在 `gh-csm` 補路徑 bootstrap（`source "$(dirname "$0")/lib/*.sh"`），
@@ -440,3 +465,14 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
 - **解鎖提示補切回**：非 active 帳號的三步提示包含切回目前 active，照做不再改掉使用者全域
   gh 登入；active 帳號維持單行 refresh。
 - **CI**：Ubuntu + macOS 雙平台跑 shellcheck 與 selftest，覆蓋 bash 5.x 與 3.2。
+
+### 9.6 1.2.0：新增 `ls`（`gh codespace list` 的薄包裝）
+
+- **為何加**：§9.1 刻意把 codespace 清單移出 quota 面板，`stop` 的選單又要求 TTY；多帳號環境
+  原本得先 `gh auth switch` 才看得到別的帳號有哪些 codespace。`ls` 補上這個缺口（唯讀、零計算），
+  quota 仍維持單次 billing 呼叫。
+- **為何只包 `ls`，不包 `rm` / `ssh`**：`ls` 唯讀且輸出可完整穿透，包裝只多出「選身分」的價值；
+  `rm` 是破壞性操作、`ssh` 是互動 session，包一層只多一個要維護與測試的介面，原生
+  `gh codespace rm` / `ssh` 已足夠。§7 保留這兩項為刻意未實作。
+- **pass-through 契約**：csm 不複刻上游旗標與欄位（避免 gh 版本漂移讓文件與行為不一致），
+  參數原序轉發、stdout 與 exit code 原樣穿透；`--all` / `--month` 不適用（§4.7）。
