@@ -77,8 +77,27 @@ This is a script extension, so `main` is the release channel:
 - `gh extension install BibbyChung/gh-csm` clones the `main` branch HEAD — the latest commit on
   `main` is the release.
 - `gh extension upgrade gh-csm` pulls the latest `main`; that is how you get a new version.
-- Git tags and GitHub Releases are informational only (a version marker and a changelog for
-  humans) — they play no role in install or upgrade.
+- Git tags are informational only: a version anchor for humans, compare links and `--pin`. They
+  play no role in install or upgrade.
+
+Releasing takes three steps:
+
+1. Add a `## [x.y.z] - YYYY-MM-DD` section to [CHANGELOG.md](CHANGELOG.md) and bump `VERSION` in
+   `gh-csm` to `x.y.z`.
+2. Commit and push to `main` — that commit is what users get on the next upgrade.
+3. Tag that commit and push the tag:
+
+   ```bash
+   git tag vx.y.z
+   git push origin vx.y.z
+   ```
+
+Tags are lightweight, not annotated: the release notes live in CHANGELOG.md, so a tag only marks
+the commit. Note that `git push --follow-tags` does **not** carry lightweight tags (it only pushes
+annotated ones), so push the tag explicitly with `git push origin vx.y.z`.
+
+Version notes are in [CHANGELOG.md](CHANGELOG.md); the reasoning behind this model is in
+[SPEC.md](SPEC.md) §9.7.
 
 ## One-time scope unlock
 

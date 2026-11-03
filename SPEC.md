@@ -17,8 +17,8 @@ GitHub Codespaces 額度監控與管理器的實作契約。使用者文件見 [
 | 資料源 | 官方 REST billing API | 網頁內部 `usage_table` 端點未公開、無版本承諾、需 session cookie，已排除 |
 | 認證 | gh 既有的 OAuth token（`user` + `codespace` scope） | 腳本不儲存、不輸出 token；只以環境變數傳遞 |
 
-三個交付檔：`gh-csm`（程式）、`README.md`（使用者）、`SPEC.md`（本文件）；另有 CI workflow
-（`.github/workflows/ci.yml`）。
+四個交付檔：`gh-csm`（程式）、`README.md`（使用者）、`SPEC.md`（本文件，why）、
+`CHANGELOG.md`（版本記錄，what）；另有 CI workflow（`.github/workflows/ci.yml`）。
 
 ---
 
@@ -265,9 +265,11 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
 15. `ls` 轉發：subshell 內 stub `gh_as` / `load_auth` / `require_scope`，驗 `--account` 被消費、
     其餘參數原序轉發、無參數不炸（空 `REST` 護欄）、`--month` 與 `--all`（真的
     `resolve_login`）被拒。
+16. 版本漂移守門：腳本自身目錄的 `CHANGELOG.md` 含 `## [<VERSION>]` 段落。不檢查 git tag
+    （CI 是 shallow clone，沒有 tags）。
 
 任一失敗 → 印「期望 vs 實際」並 exit 1；全過 → exit 0。
-輸出（標題、案例名稱、`selftest: 42 passed, 0 failed`）為英文，共 42 項，與其他使用者可見輸出一致。
+輸出（標題、案例名稱、`selftest: 43 passed, 0 failed`）為英文，共 43 項，與其他使用者可見輸出一致。
 
 ### 4.7 ls
 
@@ -339,13 +341,19 @@ fine-grained PAT 不支援；不要提供 PAT 路徑，少一條要維護的認�
 （`"$sku」"` → `sku」: unbound variable`），所以中文字串前的變數一律寫 `${var}`。
 `"${arr[@]}"` 在 bash 3.2 + `set -u` 對空陣列會報 unbound，故陣列只以索引存取。
 
-### 5.10 未來 release asset 命名
+### 5.10 發佈模型與 release asset 命名
 
-若之後發 release，asset 檔名**不要**長得像 `gh-csm-darwin-arm64`——gh 會誤判為
-binary extension 而走不同安裝路徑。目前不需要 release（`gh extension install` 直接 clone repo）。
+定案：`main` 分支即發佈通道，`CHANGELOG.md` 記錄版本、輕量 tag 當版本錨點；**不發** GitHub
+Release、不提供 asset（決策理由見 §9.7）。
 
-`main` 分支即發佈通道：安裝＝clone `main` HEAD、升級＝`git pull`；tag / release 僅供人閱讀，
-不參與安裝升級。
+- 安裝＝clone `main` HEAD、升級＝pull `main`；tag 不參與安裝升級，只供人閱讀、compare
+  與 `gh extension install --pin <tag>` 釘版本。
+- 分工：`CHANGELOG.md` 記「改了什麼」（使用者看）；本文件 §9 記「為什麼」（維護者看）。
+  同一件事不在兩處各寫一份。
+- tag 打在 `VERSION` bump 的同一個 commit 上，一律輕量 tag（`git tag vx.y.z`，不加 `-a` / `-m`）：
+  版本說明的載體是 CHANGELOG.md，tag 只負責指位置。
+- 平台後綴 asset 禁令維持：若未來真要發 asset，檔名**不要**長得像 `gh-csm-darwin-arm64`——
+  gh 會誤判為 binary extension 而走不同安裝路徑。
 
 ### 5.11 其他實作細節
 
@@ -476,3 +484,17 @@ binary extension 而走不同安裝路徑。目前不需要 release（`gh extens
   `gh codespace rm` / `ssh` 已足夠。§7 保留這兩項為刻意未實作。
 - **pass-through 契約**：csm 不複刻上游旗標與欄位（避免 gh 版本漂移讓文件與行為不一致），
   參數原序轉發、stdout 與 exit code 原樣穿透；`--all` / `--month` 不適用（§4.7）。
+
+### 9.7 版本記錄：CHANGELOG + 輕量 tag
+
+- **為何是 changelog + tag 兩件套**：使用者要知道「這版多了什麼」，維護者要知道「為什麼這樣
+  設計」，兩者壽命不同。CHANGELOG.md 以 Keep a Changelog 1.1.0 格式只寫 what（面向使用者）；
+  設計理由留在 §9，後續版本可直接引用，不必在 changelog 重述一遍。
+- **為何不發 GitHub Release**：gh script extension 的安裝與升級只認 repo 的 `main` HEAD
+  （install＝clone、upgrade＝pull），tag 與 release 對功能零影響。Release 只是多一層要同步的
+  介面，asset 還得繞 §5.10 的 binary extension 誤判，收益為零。
+- **tag 的價值**：版本錨點——GitHub tags 頁可跳到對應 commit、compare 連結能固定區間、
+  `gh extension install --pin <tag>` 可釘住版本；這三件事都不需要 Release。
+- **為何不用 annotated tag**：版本說明的載體是 CHANGELOG.md；annotated tag 自帶 message 等於
+  同一份說明存兩處，遲早不同步。輕量 tag 只負責指位置，`git tag vx.y.z <commit>` 即可。
+  既有 `v1.0.0` 是早期建立的 annotated tag，保留不動；1.1.0 起一律輕量。

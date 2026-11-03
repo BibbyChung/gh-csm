@@ -1004,6 +1004,15 @@ cmd_selftest() {
     esac
   fi
 
+  # 版本漂移守門。不檢查 git tag：CI 是 shallow clone，沒有 tags。
+  local changelog
+  changelog="$(dirname "$0")/CHANGELOG.md"
+  if grep -Fq "## [$VERSION]" "$changelog" 2>/dev/null; then
+    st_ok "CHANGELOG has a $VERSION section"
+  else
+    st_bad "CHANGELOG has a $VERSION section" "## [$VERSION]" "not found in $changelog"
+  fi
+
   printf '\nselftest: %d passed, %d failed\n' "$ST_PASS" "$ST_FAIL"
   if [ "$ST_FAIL" -gt 0 ]; then
     exit 1
