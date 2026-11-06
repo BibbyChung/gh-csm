@@ -79,6 +79,9 @@ This is a script extension, so `main` is the release channel:
 - `gh extension upgrade gh-csm` pulls the latest `main`; that is how you get a new version.
 - Git tags are informational only: a version anchor for humans, compare links and `--pin`. They
   play no role in the default install or upgrade path.
+- **Fixed in 1.1.1**: garbled non-ASCII text (e.g. Chinese) in codespace shells started via
+  `gh csm start` — older versions exported `LC_ALL=C` globally, and it leaked into the remote
+  ssh session. If you saw this before 1.1.1, upgrading fixes it.
 
 Releasing takes three steps:
 
