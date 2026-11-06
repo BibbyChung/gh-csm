@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-06
+
+### Fixed
+
+- `LC_ALL=C` is no longer exported globally: it leaked through `gh` → `ssh` into the remote shell and
+  garbled non-ASCII text. Each numeric `awk` call now pins the locale itself, and the selftest gains
+  locale regression anchors.
+
 ## [1.2.0] - 2026-11-03
 
 ### Added
@@ -47,7 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   month lengths, timezone conversion and reset countdowns.
 - MIT license.
 
-[Unreleased]: https://github.com/BibbyChung/gh-csm/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/BibbyChung/gh-csm/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/BibbyChung/gh-csm/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/BibbyChung/gh-csm/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/BibbyChung/gh-csm/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BibbyChung/gh-csm/compare/19f3c95...v1.0.0

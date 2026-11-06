@@ -269,7 +269,8 @@ Storage  ░░░░░░░░░░░░░░░░░░░░   <1%   0.
     （CI 是 shallow clone，沒有 tags）。
 
 任一失敗 → 印「期望 vs 實際」並 exit 1；全過 → exit 0。
-輸出（標題、案例名稱、`selftest: 43 passed, 0 failed`）為英文，共 43 項，與其他使用者可見輸出一致。
+輸出（標題、案例名稱、`selftest: <n> passed, 0 failed`）為英文，與其他使用者可見輸出一致。
+案例數為 43 項＋2 項 locale 回歸錨（其中 comma-locale 錨在未安裝逗號小數 locale 的機器會跳過）。
 
 ### 4.7 ls
 
@@ -501,7 +502,7 @@ Release、不提供 asset（決策理由見 §9.7）。
   同一份說明存兩處，遲早不同步。輕量 tag 只負責指位置，`git tag vx.y.z <commit>` 即可。
   既有 `v1.0.0` 是早期建立的 annotated tag，保留不動；1.1.0 起一律輕量。
 
-### 9.8 1.1.1：locale 收斂到 awk 呼叫點
+### 9.8 1.2.1：locale 收斂到 awk 呼叫點
 
 - **全域 export 改逐點前綴**：移除開頭的 `export LC_ALL=C`；9 個數值 helper（`fdiv`、`fgt`、
   `fclose`、`fmt2`、`fmt4`、`pct`、`remaining_hours`、`sum_compute`、`sum_quantity`）的 awk
@@ -511,4 +512,4 @@ Release、不提供 asset（決策理由見 §9.7）。
   遠端 sshd `AcceptEnv LC_*` → 遠端 shell 以 C locale 啟動 → codespace 內中文亂碼。
 - **保護不變**：逗號小數 locale 下格式化仍輸出點號、輸入解析仍以點號讀取；selftest 新增
   逗號 locale 回歸錨（找不到 locale 則跳過）與「腳本不得全域 export」靜態斷言。
-- **版本**：1.1.1。
+- **版本**：1.2.1（原 1.1.1，未發佈即併入）。
