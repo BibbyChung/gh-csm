@@ -362,8 +362,10 @@ Release、不提供 asset（決策理由見 §9.7）。
 - `gh codespace ssh` 的參數解析是「第一個非旗標參數之後全部視為 command」，
   用 `--` 分隔最安全（snippet 以 `-` 開頭時也不會被當旗標）。
 - 顏色需判斷 TTY，否則管線輸出會夾 ANSI escape。
-- 小數點：程式開頭 `export LC_ALL=C`。gawk 在逗號小數 locale（如 `de_DE`）會讓
-  `printf "%.2f"` 印出 `51,98`；C locale 固定小數點，輸出全 ASCII 無副作用。
+- 小數點：數值 awk 呼叫點逐處前綴 `LC_ALL=C`，輸出格式化與輸入解析都釘。gawk 在逗號小數
+  locale（如 `de_DE`）會讓 `printf "%.2f"` 印出 `51,98`，也會把小數字串讀錯；C locale 固定
+  點號。**不設全域 locale**：行程環境會經 `gh`→`ssh` 子行程繼承，macOS ssh `SendEnv LANG LC_*`
+  轉發到遠端 sshd（`AcceptEnv LC_*`），遠端 shell 以 C locale 啟動會讓 codespace 內中文變亂碼。
 
 ### 5.12 prebuild storage 字串未經實機驗證
 
@@ -498,3 +500,15 @@ Release、不提供 asset（決策理由見 §9.7）。
 - **為何不用 annotated tag**：版本說明的載體是 CHANGELOG.md；annotated tag 自帶 message 等於
   同一份說明存兩處，遲早不同步。輕量 tag 只負責指位置，`git tag vx.y.z <commit>` 即可。
   既有 `v1.0.0` 是早期建立的 annotated tag，保留不動；1.1.0 起一律輕量。
+
+### 9.8 1.1.1：locale 收斂到 awk 呼叫點
+
+- **全域 export 改逐點前綴**：移除開頭的 `export LC_ALL=C`；9 個數值 helper（`fdiv`、`fgt`、
+  `fclose`、`fmt2`、`fmt4`、`pct`、`remaining_hours`、`sum_compute`、`sum_quantity`）的 awk
+  呼叫一律改為 `LC_ALL=C awk …`。純字串 awk（`is_positive_number`、`epoch_from_iso`、
+  `accounts_inline`）不釘，維持 locale 透傳。
+- **污染鏈**：腳本 export → `gh codespace ssh` 子行程繼承 → macOS ssh `SendEnv LANG LC_*` →
+  遠端 sshd `AcceptEnv LC_*` → 遠端 shell 以 C locale 啟動 → codespace 內中文亂碼。
+- **保護不變**：逗號小數 locale 下格式化仍輸出點號、輸入解析仍以點號讀取；selftest 新增
+  逗號 locale 回歸錨（找不到 locale 則跳過）與「腳本不得全域 export」靜態斷言。
+- **版本**：1.1.1。

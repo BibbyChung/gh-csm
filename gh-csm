@@ -7,12 +7,13 @@
 # Why the code looks conservative: macOS ships /bin/bash 3.2.57, so no
 # associative arrays, no mapfile/readarray, no ${var,,}, no &>>.
 
-# LC_ALL=C：gawk 在逗號小數 locale（如 de_DE）會讓 printf "%.2f" 印出 "51,98"；C locale 只固定 awk 數值格式化的小數點。面板的 █ · ─ — 是腳本內字面值，LC_ALL 不影響其透傳輸出。
-export LC_ALL=C
+# 數值 awk 呼叫點逐處前綴 LC_ALL=C：固定小數點格式（輸出）與小數字串解析（輸入）。
+# 不做全域 locale export——本行程環境會被 gh→ssh 子行程繼承，macOS ssh SendEnv LANG LC_*
+# 轉發給遠端 sshd（AcceptEnv LC_*），遠端 shell 以 C locale 啟動會讓中文亂碼。
 
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.1.1"
 BAR_WIDTH=20
 COMPUTE_LIMIT="${GH_CSM_COMPUTE_LIMIT:-120}"
 STORAGE_LIMIT="${GH_CSM_STORAGE_LIMIT:-15}"
@@ -115,14 +116,14 @@ need_cmd() {
 
 # ---------- 數值（bash 3.2 沒有浮點，交給 awk） ----------
 
-fdiv() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.10f\n", a / b }'; }
-fgt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
-fclose() { awk -v a="$1" -v b="$2" -v t="$3" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= t) }'; }
-fmt2() { awk -v a="$1" 'BEGIN { printf "%.2f", a }'; }
-fmt4() { awk -v a="$1" 'BEGIN { printf "%.4f", a }'; }
+fdiv() { LC_ALL=C awk -v a="$1" -v b="$2" 'BEGIN { printf "%.10f\n", a / b }'; }
+fgt() { LC_ALL=C awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+fclose() { LC_ALL=C awk -v a="$1" -v b="$2" -v t="$3" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= t) }'; }
+fmt2() { LC_ALL=C awk -v a="$1" 'BEGIN { printf "%.2f", a }'; }
+fmt4() { LC_ALL=C awk -v a="$1" 'BEGIN { printf "%.4f", a }'; }
 
 pct() {
-  awk -v used="$1" -v limit="$2" 'BEGIN {
+  LC_ALL=C awk -v used="$1" -v limit="$2" 'BEGIN {
     if (limit <= 0) { print 0; exit }
     printf "%d\n", (used / limit) * 100
   }'
@@ -130,7 +131,7 @@ pct() {
 
 # 剩餘可跑時數：整數、向下取整（不虛報）。
 remaining_hours() {
-  awk -v used="$1" -v limit="$2" -v cores="$3" 'BEGIN {
+  LC_ALL=C awk -v used="$1" -v limit="$2" -v cores="$3" 'BEGIN {
     left = limit - used
     if (left < 0) left = 0
     printf "%d\n", left / cores
@@ -449,11 +450,11 @@ fetch_usage() {
 }
 
 sum_compute() {
-  awk -F'\t' '{ total += $1 * $2 } END { printf "%.10f\n", total }'
+  LC_ALL=C awk -F'\t' '{ total += $1 * $2 } END { printf "%.10f\n", total }'
 }
 
 sum_quantity() {
-  awk '{ total += $1 } END { printf "%.10f\n", total }'
+  LC_ALL=C awk '{ total += $1 } END { printf "%.10f\n", total }'
 }
 
 # 用量一律用 quantity（machine-hours / GigabyteHours），不用金額欄位。
@@ -839,6 +840,7 @@ st_near() {
 
 cmd_selftest() {
   local fixture totals compute storage hours gbm warn_out epoch_a epoch_b msg ym out
+  local comma_locale loc_out loc_list
   if [ $# -gt 0 ]; then
     die "selftest takes no arguments"
   fi
@@ -935,6 +937,28 @@ cmd_selftest() {
   st_eq "(120-51.98)/2 = 34h" "34" "$(remaining_hours "$compute" 120 2)"
   st_eq "(120-51.98)/4 = 17h" "17" "$(remaining_hours "$compute" 120 4)"
   st_eq "exhausted quota = 0h" "0" "$(remaining_hours 130 120 2)"
+
+  # locale 回歸錨：逗號小數 locale 下，數值 awk 仍須以點號輸出與解析
+  loc_list=$(locale -a 2>/dev/null || true)
+  comma_locale=""
+  for loc_out in de_DE.UTF-8 nl_NL.UTF-8 es_ES.UTF-8; do
+    case $'\n'"$loc_list"$'\n' in
+      *$'\n'"$loc_out"$'\n'*) comma_locale="$loc_out"; break ;;
+    esac
+  done
+  if [ -z "$comma_locale" ]; then
+    printf '  skip comma-locale numeric test (no de_DE/nl_NL/es_ES locale installed)\n'
+  else
+    loc_out="$(LC_ALL="$comma_locale" fmt2 51.98) $(LC_ALL="$comma_locale" pct 51.98 120)"
+    st_eq "comma locale ($comma_locale) keeps dot decimals" "51.98 43" "$loc_out"
+  fi
+
+  # 靜態錨：全域 locale export 會經 gh→ssh 污染遠端 shell，不得復活
+  if grep -Eq '(^|[[:space:]])export[[:space:]]+LC_ALL=' "$0"; then
+    st_bad "no global LC_ALL override in script" "no match" "match"
+  else
+    st_ok "no global LC_ALL override in script"
+  fi
 
   # 離重置倒數（固定 now epoch，對特定計費月）
   st_eq "countdown for 2026-10 = 7d22h" "7d22h" "$(reset_countdown 1792807200 2026 10)"
